@@ -1,0 +1,425 @@
+#!/bin/bash
+# omarchy-workspaces — pin Hyprland workspaces to specific monitors.
+#
+# Config:    ~/.config/omarchy/workspaces.json   (source of truth)
+# Generated: ~/.config/hypr/workspaces.lua       (never edit by hand)
+#
+# The same config file is read by the bar widget (kimm-stensborg.workspaces),
+# so the bar and the compositor can never disagree about who owns what.
+
+set -euo pipefail
+
+CONFIG="${OMARCHY_WORKSPACES_CONFIG:-$HOME/.config/omarchy/workspaces.json}"
+GENERATED="${OMARCHY_WORKSPACES_LUA:-$HOME/.config/hypr/workspaces.lua}"
+QUIET=0
+
+die() { echo "omarchy-workspaces: $*" >&2; exit 1; }
+say() { ((QUIET)) || echo "$@"; }
+
+# ── config helpers ───────────────────────────────────────────────────────────
+
+ensure_config() {
+  [[ -f $CONFIG ]] || die "no config at $CONFIG — run 'omarchy-workspaces detect' first"
+  jq -e '.version == 1' "$CONFIG" >/dev/null 2>&1 || die "$CONFIG is not a version 1 config"
+}
+
+write_config() { # stdin = new json
+  local tmp
+  tmp=$(mktemp "${CONFIG}.XXXXXX")
+  cat >"$tmp"
+  jq -e . "$tmp" >/dev/null || { rm -f "$tmp"; die "refusing to write invalid JSON"; }
+  mkdir -p "$(dirname "$CONFIG")"
+  mv "$tmp" "$CONFIG"
+}
+
+monitors_json() { hyprctl monitors -j; }
+
+# Resolve a config selector ("eDP-1" or "desc:Some Monitor SERIAL") to the
+# connected output name, or empty when that monitor is not plugged in.
+resolve_selector() {
+  local selector=$1
+  monitors_json | jq -r --arg sel "$selector" '
+    if ($sel | startswith("desc:")) then
+      ($sel | ltrimstr("desc:")) as $d
+      | [ .[] | select(.description == $d or (.description | startswith($d))) | .name ] | first // ""
+    else
+      [ .[] | select(.name == $sel) | .name ] | first // ""
+    end'
+}
+
+# First profile whose every monitor selector is currently connected.
+active_profile() {
+  local count name
+  count=$(jq '.profiles | length' "$CONFIG")
+  for ((i = 0; i < count; i++)); do
+    name=$(jq -r ".profiles[$i].name" "$CONFIG")
+    local ok=1 sel
+    while IFS= read -r sel; do
+      [[ -n $(resolve_selector "$sel") ]] || { ok=0; break; }
+    done < <(jq -r ".profiles[$i].monitors | keys_unsorted[]" "$CONFIG")
+    ((ok)) && { echo "$name"; return 0; }
+  done
+  return 1
+}
+
+profile_index() {
+  jq --arg n "$1" '[.profiles[].name] | index($n) // -1' "$CONFIG"
+}
+
+# ── commands ─────────────────────────────────────────────────────────────────
+
+cmd_detect() {
+  [[ -f $CONFIG && ${FORCE:-0} -eq 0 ]] && die "$CONFIG already exists (pass --force to overwrite)"
+
+  # Spread 1..10 evenly over the connected monitors, left to right, and add a
+  # single-monitor fallback profile for every monitor so undocking never
+  # strands a workspace.
+  monitors_json | jq '
+    def selector: if (.description | length) > 0 then "desc:" + .description else .name end;
+    ( sort_by(.x) ) as $mons
+    | ($mons | length) as $n
+    | [ range(0; $n) as $i
+        | { key: ($mons[$i] | selector),
+            value: [ range(1; 11) | select((. - 1) * $n / 10 | floor == $i) ] } ]
+      | from_entries as $docked
+    | { version: 1,
+        persistent: true,
+        profiles: (
+          [ { name: "all-monitors", monitors: $docked } ]
+          + ( $mons | map({ name: ("only-" + .name),
+                            monitors: { (selector): [ range(1; 11) ] } }) )
+        ) }' | write_config
+
+  say "Wrote $CONFIG from the ${1:-currently} connected monitors."
+  cmd_list
+}
+
+cmd_list() {
+  ensure_config
+  local active
+  active=$(active_profile || true)
+  echo
+  jq -r --arg active "$active" '
+    .profiles[]
+    | (if .name == $active then "● " else "  " end) as $mark
+    | ($mark + .name + (if .name == $active then "  (active)" else "" end)),
+      ( .monitors | to_entries[]
+        | "      " + (.key | if startswith("desc:") then ltrimstr("desc:") else . end)
+          + "\n        " + ([.value[] | if . == 10 then "0" else tostring end] | join(" ")) ),
+      ""' "$CONFIG"
+}
+
+cmd_status() {
+  ensure_config
+  local active
+  active=$(active_profile || echo "(none — no profile matches the connected monitors)")
+  echo "Profile:  $active"
+  echo "Config:   $CONFIG"
+  echo "Lua:      $GENERATED"
+  echo
+  printf '%-6s %-10s %-10s %s\n' "WS" "HOME" "ACTUAL" ""
+  local idx; idx=$(profile_index "$active")
+  [[ $idx == -1 ]] && return 0
+  local ws home actual
+  for ws in {1..10}; do
+    local sel
+    sel=$(jq -r --argjson i "$idx" --argjson w "$ws" \
+      '.profiles[$i].monitors | to_entries[] | select(.value | index($w)) | .key' "$CONFIG")
+    [[ -z $sel ]] && { printf '%-6s %-10s %-10s %s\n' "$ws" "-" "-" "unassigned"; continue; }
+    home=$(resolve_selector "$sel")
+    actual=$(hyprctl workspaces -j | jq -r --argjson w "$ws" '.[] | select(.id == $w) | .monitor' || true)
+    [[ -z $actual ]] && actual="-"
+    printf '%-6s %-10s %-10s %s\n' "$ws" "${home:-offline}" "$actual" \
+      "$([[ -n $home && $actual != "-" && $actual != "$home" ]] && echo '← misplaced')"
+  done
+}
+
+# expand "1-4" / "1,2,3" / "1 2 3" into a JSON array
+expand_range() {
+  local out=()
+  local tok
+  for tok in $(tr ',' ' ' <<<"$*"); do
+    if [[ $tok =~ ^([0-9]+)-([0-9]+)$ ]]; then
+      local a=${BASH_REMATCH[1]} b=${BASH_REMATCH[2]}
+      ((a <= b)) || die "bad range '$tok'"
+      for ((n = a; n <= b; n++)); do out+=("$n"); done
+    elif [[ $tok =~ ^[0-9]+$ ]]; then
+      out+=("$((tok == 0 ? 10 : tok))")
+    else
+      die "not a workspace number or range: '$tok'"
+    fi
+  done
+  ((${#out[@]})) || die "no workspaces given"
+  printf '%s\n' "${out[@]}" | jq -Rn '[inputs | tonumber] | unique'
+}
+
+cmd_assign() {
+  ensure_config
+  local profile=""
+  [[ ${1:-} == --profile ]] && { profile=$2; shift 2; }
+  local monitor=${1:?usage: assign [--profile NAME] <monitor> <workspaces>}; shift
+  local wanted; wanted=$(expand_range "$@")
+  [[ -z $profile ]] && profile=$(active_profile || die "no active profile; pass --profile")
+
+  # Accept a live output name and store the stable desc: selector for it.
+  local selector=$monitor desc
+  desc=$(monitors_json | jq -r --arg m "$monitor" '.[] | select(.name == $m) | .description' || true)
+  [[ -n $desc && $desc != "null" ]] && selector="desc:$desc"
+
+  jq --arg p "$profile" --arg m "$selector" --argjson ws "$wanted" '
+    .profiles |= map(
+      if .name == $p then
+        .monitors |= (with_entries(.value -= $ws) | .[$m] = ((.[$m] // []) + $ws | unique)
+                      | with_entries(select(.value | length > 0)))
+      else . end)' "$CONFIG" | write_config
+
+  say "Assigned $(tr '\n' ' ' <<<"$(jq -r '.[]' <<<"$wanted")")to $monitor in profile '$profile'."
+}
+
+cmd_generate() {
+  ensure_config
+  mkdir -p "$(dirname "$GENERATED")"
+  {
+    cat <<'LUA'
+-- GENERATED BY omarchy-workspaces — DO NOT EDIT.
+-- Edit ~/.config/omarchy/workspaces.json, then run: omarchy-workspaces apply
+--
+-- Pins each workspace to a home monitor. Monitors are matched by description
+-- (serial included) so identical displays keep their identity across reboots
+-- and dock reconnects. The first profile whose monitors are all connected
+-- wins, so undocking falls through to a laptop-only profile.
+
+local profiles = {
+LUA
+    jq -r '
+      .profiles[] |
+      "  { name = " + (.name | @json) + ", monitors = {\n" +
+      ( .monitors | to_entries | map(
+          "    { selector = " + (.key | @json) + ", workspaces = { " +
+          (.value | map(tostring) | join(", ")) + " } }," ) | join("\n") ) +
+      "\n  } },"' "$CONFIG"
+    local persistent
+    persistent=$(jq -r 'if .persistent == false then "false" else "true" end' "$CONFIG")
+    cat <<LUA
+}
+
+local persistent = $persistent
+LUA
+    cat <<'LUA'
+
+local function connected()
+  local byName, descs = {}, {}
+  for _, m in ipairs(hl.get_monitors() or {}) do
+    byName[m.name] = m
+    descs[#descs + 1] = { desc = m.description or "", monitor = m }
+  end
+  return byName, descs
+end
+
+local function resolve(selector, byName, descs)
+  if selector:sub(1, 5) == "desc:" then
+    local want = selector:sub(6)
+    for _, entry in ipairs(descs) do
+      if entry.desc == want or entry.desc:sub(1, #want) == want then return entry.monitor end
+    end
+    return nil
+  end
+  return byName[selector]
+end
+
+local function pick()
+  local byName, descs = connected()
+  for _, profile in ipairs(profiles) do
+    local resolved, ok = {}, true
+    for _, group in ipairs(profile.monitors) do
+      local monitor = resolve(group.selector, byName, descs)
+      if not monitor then ok = false break end
+      resolved[#resolved + 1] = { monitor = monitor, workspaces = group.workspaces }
+    end
+    if ok then return profile.name, resolved end
+  end
+  return nil, nil
+end
+
+local active, groups = pick()
+
+if groups then
+  for _, group in ipairs(groups) do
+    for _, ws in ipairs(group.workspaces) do
+      hl.workspace_rule({
+        workspace = tostring(ws),
+        monitor = group.monitor.name,
+        default = true,
+        persistent = persistent,
+      })
+    end
+  end
+end
+
+-- Rules only bind a workspace at creation time, so anything that already
+-- exists (or drifted after a hotplug) is walked home once the config settles.
+local function rehome()
+  local _, current = pick()
+  if not current then return end
+  for _, group in ipairs(current) do
+    for _, ws in ipairs(group.workspaces) do
+      local workspace = hl.get_workspace(tostring(ws))
+      if workspace and workspace.monitor and workspace.monitor.name ~= group.monitor.name then
+        hl.dispatch(hl.dsp.workspace.move({ workspace = tostring(ws), monitor = group.monitor.name }))
+      end
+    end
+  end
+end
+
+hl.timer(rehome, { timeout = 500, type = "oneshot" })
+
+-- Track the winning profile across reloads so the hotplug handler can tell a
+-- real profile change from a monitor that came back as-is.
+_G.__omarchy_workspaces = _G.__omarchy_workspaces or {}
+local state = _G.__omarchy_workspaces
+state.active = active
+
+-- A monitor coming or going can change which profile applies. Reload only when
+-- the winning profile actually changed, so hotplug never loops. The hooked flag
+-- keeps `hyprctl reload` from stacking a second copy of these subscriptions.
+local function on_monitor_change()
+  hl.timer(function()
+    local next_active = pick()
+    if next_active ~= state.active then
+      state.active = next_active
+      hl.exec_cmd("hyprctl reload")
+    else
+      rehome()
+    end
+  end, { timeout = 400, type = "oneshot" })
+end
+
+if not state.hooked then
+  state.hooked = true
+  hl.on("monitor.added", on_monitor_change)
+  hl.on("monitor.removed", on_monitor_change)
+end
+LUA
+  } >"$GENERATED"
+  say "Generated $GENERATED"
+}
+
+ensure_required() {
+  local main="$HOME/.config/hypr/hyprland.lua"
+  [[ -f $main ]] || die "missing $main"
+  grep -q 'hypr.workspaces' "$main" && return 0
+  cat >>"$main" <<'LUA'
+
+-- Workspace-to-monitor pinning. Generated by omarchy-workspaces; the require is
+-- optional so a missing/renamed workspaces.lua can never break the whole config.
+require("default.hypr.require_optional").module("hypr.workspaces")
+LUA
+  say "Hooked workspaces.lua into hyprland.lua"
+}
+
+cmd_apply() {
+  cmd_generate
+  ensure_required
+  hyprctl reload >/dev/null
+  local errors
+  errors=$(hyprctl configerrors)
+  if [[ $errors != "no errors" && -n $errors ]]; then
+    echo "$errors" >&2
+    die "Hyprland reported config errors (see above)"
+  fi
+  # Nudge already-open workspaces onto their home monitor right away rather
+  # than waiting for the lua timer.
+  local active idx
+  active=$(active_profile || die "no profile matches the connected monitors")
+  idx=$(profile_index "$active")
+  local ws sel home actual
+  for ws in {1..10}; do
+    sel=$(jq -r --argjson i "$idx" --argjson w "$ws" \
+      '.profiles[$i].monitors | to_entries[] | select(.value | index($w)) | .key' "$CONFIG")
+    [[ -z $sel ]] && continue
+    home=$(resolve_selector "$sel"); [[ -z $home ]] && continue
+    actual=$(hyprctl workspaces -j | jq -r --argjson w "$ws" '.[] | select(.id == $w) | .monitor')
+    [[ -n $actual && $actual != "$home" ]] &&
+      hyprctl dispatch "hl.dsp.workspace.move({ workspace = \"$ws\", monitor = \"$home\" })" >/dev/null
+  done
+  omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
+  say "Applied profile '$active'."
+}
+
+cmd_edit() {
+  ensure_config
+  omarchy-launch-config-editor "$CONFIG"
+}
+
+cmd_menu() {
+  ensure_config
+  while true; do
+    clear
+    cmd_status
+    echo
+    local choice
+    choice=$(gum choose --header "Workspaces" \
+      "Assign workspaces to a monitor" "Re-detect monitors (reset)" \
+      "Apply / reload" "Edit config file" "Quit") || return 0
+    case $choice in
+      "Assign workspaces to a monitor")
+        local monitor wslist
+        monitor=$(hyprctl monitors -j | jq -r '.[].name' | gum choose --header "Which monitor?") || continue
+        wslist=$(gum input --header "Workspaces for $monitor (e.g. 1-4 or 1,2,5)" --placeholder "1-4") || continue
+        [[ -z $wslist ]] && continue
+        cmd_assign "$monitor" "$wslist" && cmd_apply && gum spin --title "Applied" -- sleep 0.6
+        ;;
+      "Re-detect monitors (reset)")
+        gum confirm "Overwrite $CONFIG from the connected monitors?" || continue
+        FORCE=1 cmd_detect && cmd_apply
+        gum input --header "Done. Press enter." --placeholder "" >/dev/null || true
+        ;;
+      "Apply / reload") cmd_apply; gum spin --title "Applied" -- sleep 0.8 ;;
+      "Edit config file") cmd_edit; return 0 ;;
+      Quit|"") return 0 ;;
+    esac
+  done
+}
+
+usage() {
+  cat <<'USAGE'
+omarchy-workspaces — pin Hyprland workspaces to specific monitors
+
+  detect [--force]                 Build a config from the connected monitors
+  list                             Show every profile and its assignments
+  status                           Show where each workspace lives right now
+  assign [--profile N] <mon> <ws>  Assign workspaces (1-4, 1,2,5) to a monitor
+  generate                         Write ~/.config/hypr/workspaces.lua
+  apply                            Generate, reload Hyprland, re-home workspaces
+  edit                             Open the config in your editor
+  menu                             Interactive TUI
+
+Config: ~/.config/omarchy/workspaces.json
+USAGE
+}
+
+main() {
+  local args=()
+  for a in "$@"; do
+    case $a in
+      --quiet) QUIET=1 ;;
+      --force) FORCE=1 ;;
+      *) args+=("$a") ;;
+    esac
+  done
+  set -- "${args[@]+"${args[@]}"}"
+  case ${1:-status} in
+    detect)   shift; cmd_detect "$@" ;;
+    list)     cmd_list ;;
+    status)   cmd_status ;;
+    assign|set) shift; cmd_assign "$@" ;;
+    generate) cmd_generate ;;
+    apply)    cmd_apply ;;
+    edit)     cmd_edit ;;
+    menu)     cmd_menu ;;
+    -h|--help|help) usage ;;
+    *) usage; exit 1 ;;
+  esac
+}
+
+main "$@"

@@ -15,6 +15,35 @@ from one config file.
 └───────────────┘ └────────────────┘ └───────┘
 ```
 
+## The editor
+
+**Setup → Workspaces** in the Omarchy menu (or `omarchy-workspaces open`) opens
+a visual editor. Monitors are drawn to scale in their real arrangement, so the
+picture matches the desk.
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Workspaces                        [This monitor][All monitors]
+│  Drag a workspace onto a monitor, or click one to send it on. │
+│                                                               │
+│  ┌── DP-7 ────────┐┌── DP-5 ────────┐┌ eDP-1 ──┐             │
+│  │ 2560 x 1440    ││ 2560 x 1440    ││1920x1200│             │
+│  │ 1  2  3  4     ││ 5  6  7  8     ││ 9  0    │             │
+│  └────────────────┘└────────────────┘└─────────┘             │
+│                                                               │
+│  Unpinned — drop a workspace here to let it roam              │
+│                                                               │
+│  Profile: all-monitors      [Spread evenly][Cancel][Apply]    │
+└──────────────────────────────────────────────────────────────┘
+```
+
+- **Drag** a workspace chip from one monitor to another.
+- **Click** a chip to send it to the next monitor — or press its number key.
+  `0` is workspace 10.
+- **Drop it in the tray** to unpin it, letting Hyprland place it wherever you are.
+- **This monitor / All monitors** sets what every bar draws, described below.
+- Nothing is written until **Apply**; `Esc` or **Cancel** throws the edit away.
+
 ## What it does
 
 - **Pins workspaces to monitors.** Generates Hyprland `workspace_rule` entries
@@ -42,14 +71,24 @@ The installer links the CLI into `~/.local/bin`, links the plugin into
 **Setup → Workspaces** to the Omarchy menu, and swaps `omarchy.workspaces` for
 this widget in the bar. It is safe to re-run.
 
+The plugin is two things in one: a `bar-widget` that draws the numbers, and an
+`overlay` that edits them. Both read the same config file, so they cannot
+disagree.
+
+While hacking on it, note that `omarchy-shell shell rescanPlugins` reloads the
+bar widget but not an overlay instance that is already mounted — restart the
+shell (`omarchy restart shell`) after changing `Overlay.qml`.
+
 ## Usage
 
 ```bash
+omarchy-workspaces open                # the visual editor
 omarchy-workspaces status              # where each workspace lives right now
 omarchy-workspaces list                # every profile and its assignments
 omarchy-workspaces assign DP-7 1-4     # assign; accepts 1-4, 1,2,5, or 0 for 10
 omarchy-workspaces apply               # regenerate rules, reload, re-home
-omarchy-workspaces menu                # interactive TUI
+omarchy-workspaces show all            # bar draws every workspace, grouped
+omarchy-workspaces menu                # interactive TUI, for a terminal
 ```
 
 `assign` takes a live output name and stores the stable `desc:` selector for it,
@@ -95,7 +134,7 @@ Set these inline on the widget's entry in `~/.config/omarchy/shell.json`:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `show` | `"own"` | `"own"` renders only this monitor's workspaces; `"all"` renders every assigned workspace, grouped, with this monitor's group at full strength and the others dimmed. |
+| `show` | `"own"` | `"own"` renders only this monitor's workspaces; `"all"` renders every assigned workspace, grouped, with this monitor's group at full strength and the others dimmed. The editor's toggle sets this. |
 | `separators` | `true` | Draw a divider between monitor groups. Only used when `show` is `"all"`. |
 
 ## How keys behave

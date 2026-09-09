@@ -44,12 +44,7 @@ path = pathlib.Path(sys.argv[1])
 text = path.read_text()
 rows = '''
   // ── omarchy-workspaces ──────────────────────────────────────────────────
-  "setup.workspaces": {"icon":"󰕰","label":"Workspaces","aliases":["workspaces","monitors-workspaces"],"description":"Pin workspaces to monitors"},
-  "setup.workspaces.assign": {"icon":"󰓾","label":"Assign","description":"Choose which workspaces live on which monitor","action":"omarchy-launch-or-focus-tui 'omarchy-workspaces menu'"},
-  "setup.workspaces.status": {"icon":"󰋽","label":"Status","description":"Show where each workspace lives right now","action":"omarchy-launch-floating-terminal-with-presentation 'omarchy-workspaces status; read -n 1'"},
-  "setup.workspaces.apply": {"icon":"󰑓","label":"Apply","description":"Regenerate the Hyprland rules and reload","action":"omarchy-workspaces apply"},
-  "setup.workspaces.detect": {"icon":"󰍹","label":"Reset to detected","description":"Rebuild the config from the connected monitors","action":"omarchy-launch-floating-terminal-with-presentation 'omarchy-workspaces detect --force && omarchy-workspaces apply; read -n 1'"},
-  "setup.workspaces.edit": {"icon":"","label":"Edit config","action":"omarchy-launch-config-editor \\"$HOME/.config/omarchy/workspaces.json\\""},
+  "setup.workspaces": {"icon":"󰕰","label":"Workspaces","aliases":["workspaces"],"description":"Pin workspaces to monitors","action":"omarchy-workspaces open"},
 '''
 index = text.rstrip().rfind('}')
 path.write_text(text[:index].rstrip('\n') + '\n' + rows + text[index:])

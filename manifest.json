@@ -5,21 +5,33 @@
   "version": "1.0.0",
   "author": "kimm-stensborg",
   "description": "Pins workspaces to monitors and shows each monitor's own workspaces in its bar",
-  "kinds": ["bar-widget"],
-  "entryPoints": { "barWidget": "Workspaces.qml" },
+  "kinds": [
+    "bar-widget",
+    "overlay"
+  ],
+  "entryPoints": {
+    "barWidget": "Workspaces.qml",
+    "overlay": "Overlay.qml"
+  },
   "barWidget": {
     "displayName": "Workspaces per monitor",
     "description": "Workspace indicators filtered to the monitor the bar is on",
     "category": "Compositor",
     "allowMultiple": false,
     "defaultSection": "left",
-    "defaults": { "show": "own", "separators": true },
+    "defaults": {
+      "show": "own",
+      "separators": true
+    },
     "schema": [
       {
         "key": "show",
         "type": "enum",
         "label": "Show",
-        "options": ["own", "all"],
+        "options": [
+          "own",
+          "all"
+        ],
         "description": "own: only this monitor's workspaces. all: every workspace, grouped, with this monitor's group lit."
       },
       {

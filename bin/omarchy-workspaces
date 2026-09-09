@@ -10,6 +10,8 @@
 set -euo pipefail
 
 CONFIG="${OMARCHY_WORKSPACES_CONFIG:-$HOME/.config/omarchy/workspaces.json}"
+SHELL_JSON="${OMARCHY_SHELL_JSON:-$HOME/.config/omarchy/shell.json}"
+PLUGIN_ID="kimm-stensborg.workspaces"
 GENERATED="${OMARCHY_WORKSPACES_LUA:-$HOME/.config/hypr/workspaces.lua}"
 QUIET=0
 
@@ -381,10 +383,70 @@ cmd_menu() {
   done
 }
 
+# Replace a whole profile in one shot. This is what the overlay calls when you
+# hit Apply: it hands over the entire monitor -> workspaces map rather than a
+# stream of per-monitor edits, so a half-applied layout is not possible.
+#
+# Keys are live output names; they are stored as desc: selectors, because the
+# overlay speaks in the names Hyprland is using right now and the config has to
+# survive those names changing.
+cmd_set_layout() {
+  ensure_config
+  local profile="" payload=""
+  while (($#)); do
+    case $1 in
+      --profile) profile=${2:?--profile needs a name}; shift 2 ;;
+      --base64)  payload=$(base64 -d <<<"${2:?--base64 needs a value}"); shift 2 ;;
+      *)         payload=$1; shift ;;
+    esac
+  done
+  [[ -n $payload ]] || die "set-layout needs a JSON object of monitor -> workspaces"
+  jq -e 'type == "object"' <<<"$payload" >/dev/null 2>&1 || die "set-layout payload is not a JSON object"
+  [[ -z $profile ]] && profile=$(active_profile || die "no profile matches the connected monitors")
+
+  local mapped
+  mapped=$(jq -n --argjson layout "$payload" --argjson mons "$(monitors_json)" '
+    ( $mons
+      | map(select((.description // "") != "") | { key: .name, value: ("desc:" + .description) })
+      | from_entries ) as $selector
+    | $layout
+    | with_entries(
+        .key = ($selector[.key] // .key)
+        | .value |= (map(tonumber) | unique))
+    | with_entries(select(.value | length > 0))')
+
+  jq --arg p "$profile" --argjson m "$mapped" '
+    .profiles |= map(if .name == $p then .monitors = $m else . end)' "$CONFIG" | write_config
+
+  say "Replaced the layout of profile '$profile'."
+}
+
+# The bar widget's own inline setting in shell.json. Kept here so the TUI, the
+# overlay, and a script all flip the same field the same way.
+cmd_show() {
+  local mode=${1:-}
+  [[ $mode == own || $mode == all ]] || die "show takes 'own' or 'all'"
+  [[ -f $SHELL_JSON ]] || die "no $SHELL_JSON"
+  local tmp; tmp=$(mktemp)
+  jq --arg id "$PLUGIN_ID" --arg mode "$mode" '
+    .bar.layout |= with_entries(
+      .value |= map(if .id == $id then .show = $mode else . end))' "$SHELL_JSON" >"$tmp"
+  jq -e . "$tmp" >/dev/null || { rm -f "$tmp"; die "refusing to write invalid shell.json"; }
+  mv "$tmp" "$SHELL_JSON"
+  omarchy-shell shell reloadConfig >/dev/null 2>&1 || true
+  say "Bar now shows: $mode"
+}
+
+cmd_open() {
+  omarchy-shell shell summon "$PLUGIN_ID" '{}' >/dev/null 2>&1 ||
+    die "could not summon the overlay (is omarchy-shell running?)"
+}
+
 usage() {
   cat <<'USAGE'
 omarchy-workspaces — pin Hyprland workspaces to specific monitors
 
+  open                             Open the visual editor overlay
   detect [--force]                 Build a config from the connected monitors
   list                             Show every profile and its assignments
   status                           Show where each workspace lives right now
@@ -392,6 +454,8 @@ omarchy-workspaces — pin Hyprland workspaces to specific monitors
   generate                         Write ~/.config/hypr/workspaces.lua
   apply                            Generate, reload Hyprland, re-home workspaces
   edit                             Open the config in your editor
+  show <own|all>                   Bar shows this monitor's workspaces, or all
+  set-layout --base64 <b64>        Replace a whole profile (used by the overlay)
   menu                             Interactive TUI
 
 Config: ~/.config/omarchy/workspaces.json
@@ -417,6 +481,9 @@ main() {
     apply)    cmd_apply ;;
     edit)     cmd_edit ;;
     menu)     cmd_menu ;;
+    open)     cmd_open ;;
+    show)     shift; cmd_show "$@" ;;
+    set-layout) shift; cmd_set_layout "$@" ;;
     -h|--help|help) usage ;;
     *) usage; exit 1 ;;
   esac

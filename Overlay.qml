@@ -34,8 +34,8 @@ Item {
   property var assignments: ({})
   property var unassigned: []
   property string profileName: ""
-  property string showMode: "own"
-  property string initialShowMode: "own"
+  property bool hideEmpty: false
+  property bool initialHideEmpty: false
   property bool dirty: false
 
   property color background: Color.menu.background
@@ -93,8 +93,8 @@ Item {
   // Same story for shell.json, which decides where the mode toggle starts.
   onShellConfigChanged: {
     if (!root.opened || root.dirty) return
-    root.showMode = root.currentShowMode()
-    root.initialShowMode = root.showMode
+    root.hideEmpty = root.currentHideEmpty()
+    root.initialHideEmpty = root.hideEmpty
   }
 
   function parseConfig(content) {
@@ -179,8 +179,8 @@ Item {
 
     root.assignments = next
     root.unassigned = left
-    root.showMode = root.currentShowMode()
-    root.initialShowMode = root.showMode
+    root.hideEmpty = root.currentHideEmpty()
+    root.initialHideEmpty = root.hideEmpty
     root.dirty = false
   }
 
@@ -201,19 +201,19 @@ Item {
     onLoadFailed: root.shellConfig = null
   }
 
-  function currentShowMode() {
+  function currentHideEmpty() {
     var bar = root.shellConfig ? root.shellConfig.bar : null
     var layout = bar && bar.layout ? bar.layout : null
-    if (!layout) return "own"
+    if (!layout) return false
     var sections = ["left", "center", "right"]
     for (var s = 0; s < sections.length; s++) {
       var entries = layout[sections[s]] || []
       for (var i = 0; i < entries.length; i++) {
         if (entries[i] && entries[i].id === root.pluginId)
-          return entries[i].show === "all" ? "all" : "own"
+          return entries[i].hideEmpty === true
       }
     }
-    return "own"
+    return false
   }
 
   // ── editing ───────────────────────────────────────────────────────────────
@@ -275,8 +275,8 @@ Item {
     // ever being read as shell syntax.
     var command = "omarchy-workspaces set-layout --base64 "
       + Qt.btoa(JSON.stringify(payload)) + " --quiet"
-    if (root.showMode !== root.initialShowMode)
-      command += " && omarchy-workspaces show " + root.showMode + " --quiet"
+    if (root.hideEmpty !== root.initialHideEmpty)
+      command += " && omarchy-workspaces hide-empty " + (root.hideEmpty ? "on" : "off") + " --quiet"
     command += " && omarchy-workspaces apply --quiet"
 
     Quickshell.execDetached(["bash", "-lc", command])
@@ -407,6 +407,10 @@ Item {
           } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
             if (root.dirty) root.apply()
             event.accepted = true
+          } else if (event.text === "h" || event.text === "H") {
+            root.hideEmpty = !root.hideEmpty
+            root.dirty = true
+            event.accepted = true
           } else if (event.text >= "0" && event.text <= "9" && event.text.length === 1) {
             root.cycleWorkspace(event.text === "0" ? 10 : parseInt(event.text))
             event.accepted = true
@@ -427,7 +431,7 @@ Item {
         // ── header ──────────────────────────────────────────────────────────
         Item {
           width: parent.width
-          height: Math.max(titles.implicitHeight, modeToggle.implicitHeight)
+          height: Math.max(titles.implicitHeight, modeToggle.height)
 
           Column {
             id: titles
@@ -448,7 +452,7 @@ Item {
               width: parent.width
               text: root.monitors.length > 1
                 ? "Drag a workspace onto a monitor, or click one to send it to the next."
-                : "Only one monitor is connected, so everything lives here."
+                : "One monitor, so everything lives here — drop one below to unpin it."
               color: root.foreground
               opacity: 0.6
               font.family: root.fontFamily
@@ -458,50 +462,50 @@ Item {
             }
           }
 
-          // Which workspaces each monitor's bar draws. One setting for the
-          // widget, not one per monitor — there is a single widget entry in
-          // shell.json and every bar surface reads it.
-          Row {
+          // Each bar always draws its own monitor's workspaces. This decides
+          // whether it draws all of them or only the ones in use.
+          Rectangle {
             id: modeToggle
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.spacing.hairline
+            width: toggleRow.implicitWidth + Style.spacing.controlPaddingX * 2
+            height: Style.spacing.controlHeight
+            radius: Style.cornerRadius
+            color: root.hideEmpty ? Style.selectedFill
+              : (toggleHover.hovered ? Style.hoverFill : "transparent")
+            border.width: 1
+            border.color: root.hideEmpty ? root.accent : root.hairline
 
-            Repeater {
-              model: [
-                { key: "own", label: "This monitor" },
-                { key: "all", label: "All monitors" }
-              ]
+            Row {
+              id: toggleRow
+              anchors.centerIn: parent
+              spacing: Style.spacing.sm
 
-              Rectangle {
-                required property var modelData
-                readonly property bool active: root.showMode === modelData.key
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.hideEmpty ? "\u2713" : "\u00b7"
+                color: root.hideEmpty ? root.accent : root.foreground
+                opacity: root.hideEmpty ? 1 : 0.45
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                textFormat: Text.PlainText
+              }
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Hide empty"
+                color: root.hideEmpty ? root.accent : root.foreground
+                opacity: root.hideEmpty ? 1 : 0.7
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                textFormat: Text.PlainText
+              }
+            }
 
-                width: modeLabel.implicitWidth + Style.spacing.controlPaddingX * 2
-                height: Style.spacing.controlHeight
-                radius: Style.cornerRadius
-                color: active ? Style.selectedFill : (modeHover.hovered ? Style.hoverFill : "transparent")
-                border.width: 1
-                border.color: active ? root.accent : root.hairline
-
-                Text {
-                  id: modeLabel
-                  anchors.centerIn: parent
-                  text: modelData.label
-                  color: parent.active ? root.accent : root.foreground
-                  opacity: parent.active ? 1 : 0.7
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  textFormat: Text.PlainText
-                }
-
-                HoverHandler { id: modeHover; cursorShape: Qt.PointingHandCursor }
-                TapHandler {
-                  onTapped: {
-                    root.showMode = modelData.key
-                    root.dirty = true
-                  }
-                }
+            HoverHandler { id: toggleHover; cursorShape: Qt.PointingHandCursor }
+            TapHandler {
+              onTapped: {
+                root.hideEmpty = !root.hideEmpty
+                root.dirty = true
               }
             }
           }

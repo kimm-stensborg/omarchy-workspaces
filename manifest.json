@@ -20,25 +20,14 @@
     "allowMultiple": false,
     "defaultSection": "left",
     "defaults": {
-      "show": "own",
-      "separators": true
+      "hideEmpty": false
     },
     "schema": [
       {
-        "key": "show",
-        "type": "enum",
-        "label": "Show",
-        "options": [
-          "own",
-          "all"
-        ],
-        "description": "own: only this monitor's workspaces. all: every workspace, grouped, with this monitor's group lit."
-      },
-      {
-        "key": "separators",
+        "key": "hideEmpty",
         "type": "boolean",
-        "label": "Group separators",
-        "description": "Draw a divider between monitor groups (only used when Show is 'all')."
+        "label": "Hide empty workspaces",
+        "description": "Draw only the workspaces that hold windows. The focused workspace is always shown."
       }
     ]
   }

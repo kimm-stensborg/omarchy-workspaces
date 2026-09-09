@@ -87,7 +87,7 @@ omarchy-workspaces status              # where each workspace lives right now
 omarchy-workspaces list                # every profile and its assignments
 omarchy-workspaces assign DP-7 1-4     # assign; accepts 1-4, 1,2,5, or 0 for 10
 omarchy-workspaces apply               # regenerate rules, reload, re-home
-omarchy-workspaces show all            # bar draws every workspace, grouped
+omarchy-workspaces hide-empty on       # bar draws only workspaces holding windows
 omarchy-workspaces menu                # interactive TUI, for a terminal
 ```
 
@@ -134,8 +134,7 @@ Set these inline on the widget's entry in `~/.config/omarchy/shell.json`:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `show` | `"own"` | `"own"` renders only this monitor's workspaces; `"all"` renders every assigned workspace, grouped, with this monitor's group at full strength and the others dimmed. The editor's toggle sets this. |
-| `separators` | `true` | Draw a divider between monitor groups. Only used when `show` is `"all"`. |
+| `hideEmpty` | `false` | Draw only the workspaces that hold windows, instead of every workspace assigned to this monitor. The focused workspace is always drawn, however empty. The editor's toggle sets this. |
 
 ## How keys behave
 

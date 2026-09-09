@@ -344,7 +344,11 @@ cmd_apply() {
     [[ -n $actual && $actual != "$home" ]] &&
       hyprctl dispatch "hl.dsp.workspace.move({ workspace = \"$ws\", monitor = \"$home\" })" >/dev/null
   done
-  omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
+  # Deliberately no `rescanPlugins` here. That reloads plugin *code*, and doing
+  # it during a config change races the bar's in-place settings patch: the patch
+  # lands on the bar's layout copy but not on the widget being torn down, and
+  # because the next reload then sees no delta, nothing ever reconciles it. The
+  # widget watches workspaces.json itself, so there is nothing to nudge.
   say "Applied profile '$active'."
 }
 
@@ -421,20 +425,28 @@ cmd_set_layout() {
   say "Replaced the layout of profile '$profile'."
 }
 
-# The bar widget's own inline setting in shell.json. Kept here so the TUI, the
-# overlay, and a script all flip the same field the same way.
-cmd_show() {
+# The bar widget's own inline settings in shell.json. Kept here so the TUI, the
+# overlay, and a script all flip the same field the same way. The del() also
+# clears the settings of earlier versions, so an upgraded config does not carry
+# keys the widget no longer reads.
+cmd_hide_empty() {
   local mode=${1:-}
-  [[ $mode == own || $mode == all ]] || die "show takes 'own' or 'all'"
+  case $mode in
+    on|true|yes)  mode=true ;;
+    off|false|no) mode=false ;;
+    *) die "hide-empty takes 'on' or 'off'" ;;
+  esac
   [[ -f $SHELL_JSON ]] || die "no $SHELL_JSON"
   local tmp; tmp=$(mktemp)
-  jq --arg id "$PLUGIN_ID" --arg mode "$mode" '
+  jq --arg id "$PLUGIN_ID" --argjson mode "$mode" '
     .bar.layout |= with_entries(
-      .value |= map(if .id == $id then .show = $mode else . end))' "$SHELL_JSON" >"$tmp"
+      .value |= map(
+        if .id == $id then (.hideEmpty = $mode | del(.show, .separators)) else . end))' \
+    "$SHELL_JSON" >"$tmp"
   jq -e . "$tmp" >/dev/null || { rm -f "$tmp"; die "refusing to write invalid shell.json"; }
   mv "$tmp" "$SHELL_JSON"
   omarchy-shell shell reloadConfig >/dev/null 2>&1 || true
-  say "Bar now shows: $mode"
+  say "Hide empty workspaces: $mode"
 }
 
 cmd_open() {
@@ -454,7 +466,7 @@ omarchy-workspaces — pin Hyprland workspaces to specific monitors
   generate                         Write ~/.config/hypr/workspaces.lua
   apply                            Generate, reload Hyprland, re-home workspaces
   edit                             Open the config in your editor
-  show <own|all>                   Bar shows this monitor's workspaces, or all
+  hide-empty <on|off>              Bar draws only workspaces holding windows
   set-layout --base64 <b64>        Replace a whole profile (used by the overlay)
   menu                             Interactive TUI
 
@@ -482,7 +494,7 @@ main() {
     edit)     cmd_edit ;;
     menu)     cmd_menu ;;
     open)     cmd_open ;;
-    show)     shift; cmd_show "$@" ;;
+    hide-empty) shift; cmd_hide_empty "$@" ;;
     set-layout) shift; cmd_set_layout "$@" ;;
     -h|--help|help) usage ;;
     *) usage; exit 1 ;;

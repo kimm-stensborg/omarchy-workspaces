@@ -42,7 +42,21 @@ omarchy plugin enable io.github.kimm-stensborg.workspaces --section left
 `omarchy plugin add` clones into
 `~/.config/omarchy/plugins/io.github.kimm-stensborg.workspaces/` and leaves the
 plugin disabled so the code can be reviewed before it runs. Plugins execute
-unsandboxed inside `omarchy-shell`.
+unsandboxed inside `omarchy-shell`, so that pause is the point — read it first.
+
+Both commands prompt when run bare in a terminal. To skip every prompt, which
+is the path for scripts and agents:
+
+```bash
+omarchy plugin add https://github.com/kimm-stensborg/omarchy-workspaces.git --enable --yes
+```
+
+Updating and removing are the same two commands you already know:
+
+```bash
+omarchy plugin update io.github.kimm-stensborg.workspaces   # fetch, show a diff, fast-forward
+omarchy plugin remove io.github.kimm-stensborg.workspaces
+```
 
 Enabling it is the whole setup. `omarchy plugin add` never runs an install
 hook, so the plugin's `service` does the rest itself the moment it loads:

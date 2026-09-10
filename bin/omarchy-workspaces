@@ -17,6 +17,7 @@ CONFIG="${OMARCHY_WORKSPACES_CONFIG:-$HOME/.config/omarchy/workspaces.json}"
 SHELL_JSON="${OMARCHY_SHELL_JSON:-$HOME/.config/omarchy/shell.json}"
 PLUGIN_ID="io.github.kimm-stensborg.workspaces"
 GENERATED="${OMARCHY_WORKSPACES_LUA:-$HOME/.config/hypr/workspaces.lua}"
+MONITORS_LUA="${OMARCHY_MONITORS_LUA:-$HOME/.config/hypr/monitors.lua}"
 QUIET=0
 
 die() { echo "omarchy-workspaces: $*" >&2; exit 1; }
@@ -603,6 +604,170 @@ cmd_scrollable() {
   say "Scrolling layout on $monitor in profile '$profile': $mode"
 }
 
+# ── monitor arrangement ──────────────────────────────────────────────────────
+#
+# Where each monitor sits on the desk lives in ~/.config/hypr/monitors.lua, and
+# that file is yours: the modes, the scales and the comments around them are
+# none of this plugin's business. So this does not regenerate it. It rewrites
+# the one `position = "XxY"` string inside each `hl.monitor` block it can match
+# to a connected monitor, and appends a block only for a monitor that has none.
+#
+# Matching accepts either form the file may use — a bare output name, or a
+# `desc:` selector (whole or prefix). The catch-all block for newly connected
+# displays has an empty output and is never touched.
+
+MONITORS_MARKER="Added by omarchy-workspaces"
+
+arrange_awk() {
+  cat <<'AWK'
+function value(line, key,    span) {
+  if (!match(line, key "[ \t]*=[ \t]*\"[^\"]*\"")) return ""
+  span = substr(line, RSTART, RLENGTH)
+  match(span, /"[^"]*"/)
+  return substr(span, RSTART + 1, RLENGTH - 2)
+}
+
+# The block's output, matched against the monitors we were asked to move.
+function target_for(out,   i, desc) {
+  if (out == "") return 0
+  for (i = 1; i <= n; i++) {
+    desc = tdesc[i]
+    if (out == tname[i]) return i
+    if (desc != "" && out == "desc:" desc) return i
+    if (substr(out, 1, 5) == "desc:" && desc != "" && index(desc, substr(out, 6)) == 1) return i
+  }
+  return 0
+}
+
+function flush(   i, out, outline, posline, idx, indent) {
+  outline = 0; posline = 0; out = ""
+  for (i = 1; i <= nb; i++) {
+    if (!outline && match(buf[i], /output[ \t]*=[ \t]*"[^"]*"/)) {
+      outline = i
+      out = value(buf[i], "output")
+    }
+    if (!posline && match(buf[i], /position[ \t]*=[ \t]*"[^"]*"/)) posline = i
+  }
+
+  idx = outline ? target_for(out) : 0
+  if (idx > 0) {
+    tused[idx] = 1
+    if (posline) {
+      sub(/position[ \t]*=[ \t]*"[^"]*"/, "position = \"" tpos[idx] "\"", buf[posline])
+    } else {
+      # No position of its own — give it one, indented like the output line.
+      indent = buf[outline]
+      sub(/[^ \t].*$/, "", indent)
+      for (i = nb; i > outline; i--) buf[i + 1] = buf[i]
+      buf[outline + 1] = indent "position = \"" tpos[idx] "\","
+      nb++
+    }
+  }
+
+  for (i = 1; i <= nb; i++) print buf[i]
+}
+
+BEGIN {
+  while ((getline line < targets) > 0) {
+    split(line, field, "\t")
+    n++
+    tname[n] = field[1]; tdesc[n] = field[2]; tpos[n] = field[3]
+  }
+  close(targets)
+}
+
+{
+  if (!inblock) {
+    if ($0 !~ /hl\.monitor[ \t]*\(/) { print; next }
+    inblock = 1; depth = 0; nb = 0
+  }
+
+  buf[++nb] = $0
+  # Brace depth, not paren depth: a monitor description can hold a paren, and
+  # none of them hold a brace.
+  copy = $0; opens = gsub(/\{/, "{", copy)
+  copy = $0; closes = gsub(/\}/, "}", copy)
+  depth += opens - closes
+  if (depth <= 0) { flush(); inblock = 0 }
+}
+
+END {
+  # An unterminated block is a file we do not understand; hand it back whole.
+  if (inblock) for (i = 1; i <= nb; i++) print buf[i]
+
+  for (i = 1; i <= n; i++) {
+    if (tused[i]) continue
+    if (!appended) {
+      print ""
+      print "-- " marker " — set the mode and scale you want."
+      appended = 1
+    }
+    printf "hl.monitor({ output = \"%s\", mode = \"preferred\", position = \"%s\", scale = 1 })\n",
+      (tdesc[i] != "" ? "desc:" tdesc[i] : tname[i]), tpos[i]
+  }
+}
+AWK
+}
+
+cmd_arrange() {
+  local payload="" pairs=()
+  while (($#)); do
+    case $1 in
+      --base64) payload=$(base64 -d <<<"${2:?--base64 needs a value}"); shift 2 ;;
+      *)        pairs+=("$1"); shift ;;
+    esac
+  done
+
+  if [[ -z $payload ]]; then
+    ((${#pairs[@]} >= 2 && ${#pairs[@]} % 2 == 0)) ||
+      die "usage: arrange <monitor> <XxY> [<monitor> <XxY> ...]"
+    payload=$(printf '%s\n' "${pairs[@]}" | jq -Rn '
+      [inputs] as $f | reduce range(0; $f | length; 2) as $i ({}; .[$f[$i]] = $f[$i + 1])')
+  fi
+
+  jq -e 'type == "object" and (length > 0)' <<<"$payload" >/dev/null 2>&1 ||
+    die "arrange needs a JSON object of monitor -> \"XxY\""
+  jq -e 'all(.[]; type == "string" and test("^-?[0-9]+x-?[0-9]+$"))' <<<"$payload" >/dev/null 2>&1 ||
+    die "every position must look like 2560x0"
+
+  # Output name, description, position — one line per monitor, for awk. Only
+  # connected monitors: a position for something unplugged has nothing to match
+  # and would append a block for a display that may never come back.
+  local targets; targets=$(mktemp)
+  # shellcheck disable=SC2064
+  trap "rm -f '$targets'" RETURN
+  jq -r --argjson mons "$(monitors_json)" '
+    ($mons | map({ key: .name, value: (.description // "") }) | from_entries) as $desc
+    | to_entries[]
+    | select($desc[.key] != null)
+    | [.key, $desc[.key], .value] | @tsv' <<<"$payload" >"$targets"
+  [[ -s $targets ]] || die "none of those monitors are connected"
+
+  if [[ ! -f $MONITORS_LUA ]]; then
+    mkdir -p "$(dirname "$MONITORS_LUA")"
+    printf -- '-- See https://wiki.hypr.land/Configuring/Basics/Monitors/\n' >"$MONITORS_LUA"
+    say "Created $MONITORS_LUA"
+  fi
+
+  # monitors.lua is a hand-written file this plugin only visits. Keep the
+  # pristine copy the first time we touch it, and never overwrite that backup.
+  [[ -f ${MONITORS_LUA}.bak ]] || cp "$MONITORS_LUA" "${MONITORS_LUA}.bak"
+
+  local tmp; tmp=$(mktemp "${MONITORS_LUA}.XXXXXX")
+  awk -v targets="$targets" -v marker="$MONITORS_MARKER" -f <(arrange_awk) "$MONITORS_LUA" >"$tmp" ||
+    { rm -f "$tmp"; die "could not rewrite $MONITORS_LUA"; }
+
+  if cmp -s "$tmp" "$MONITORS_LUA"; then
+    rm -f "$tmp"
+    say "Monitor arrangement already matches $MONITORS_LUA."
+    return 0
+  fi
+
+  chmod --reference="$MONITORS_LUA" "$tmp" 2>/dev/null || true
+  mv "$tmp" "$MONITORS_LUA"
+  say "Arranged $(wc -l <"$targets") monitors in $MONITORS_LUA."
+}
+
 cmd_open() {
   omarchy-shell shell summon "$PLUGIN_ID" '{}' >/dev/null 2>&1 ||
     die "could not summon the overlay (is omarchy-shell running?)"
@@ -622,6 +787,7 @@ omarchy-workspaces — pin Hyprland workspaces to specific monitors
   apply                            Generate, reload Hyprland, re-home workspaces
   edit                             Open the config in your editor
   scrollable <monitor> <on|off>    Monitor's workspaces scroll instead of tile
+  arrange <mon> <XxY> [...]        Move monitors on the desk (rewrites monitors.lua)
   hide-empty <on|off>              Bar draws only workspaces holding windows
   set-layout --base64 <b64>        Replace a whole profile (used by the overlay)
   menu                             Interactive TUI
@@ -653,6 +819,7 @@ main() {
     menu)     cmd_menu ;;
     open)     cmd_open ;;
     scrollable) shift; cmd_scrollable "$@" ;;
+    arrange|set-monitors) shift; cmd_arrange "$@" ;;
     hide-empty) shift; cmd_hide_empty "$@" ;;
     set-layout) shift; cmd_set_layout "$@" ;;
     -h|--help|help) usage ;;

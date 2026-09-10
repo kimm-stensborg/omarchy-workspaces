@@ -104,9 +104,11 @@ cmd_list() {
   jq -r --arg active "$active" '
     .profiles[]
     | (if .name == $active then "● " else "  " end) as $mark
+    | ((.scrollable // []) | map({ key: ., value: true }) | from_entries) as $scroll
     | ($mark + .name + (if .name == $active then "  (active)" else "" end)),
       ( .monitors | to_entries[]
         | "      " + (.key | if startswith("desc:") then ltrimstr("desc:") else . end)
+          + (if $scroll[.key] then "  ⟷ scrolling" else "" end)
           + "\n        " + ([.value[] | if . == 10 then "0" else tostring end] | join(" ")) ),
       ""' "$CONFIG"
 }
@@ -155,6 +157,14 @@ expand_range() {
   printf '%s\n' "${out[@]}" | jq -Rn '[inputs | tonumber] | unique'
 }
 
+# Accept a live output name and give back the stable desc: selector for it, so
+# nothing stored in the config depends on an output name that can move.
+selector_for() {
+  local monitor=$1 desc
+  desc=$(monitors_json | jq -r --arg m "$monitor" '.[] | select(.name == $m) | .description' || true)
+  if [[ -n $desc && $desc != "null" ]]; then echo "desc:$desc"; else echo "$monitor"; fi
+}
+
 cmd_assign() {
   ensure_config
   local profile=""
@@ -163,10 +173,7 @@ cmd_assign() {
   local wanted; wanted=$(expand_range "$@")
   [[ -z $profile ]] && profile=$(active_profile || die "no active profile; pass --profile")
 
-  # Accept a live output name and store the stable desc: selector for it.
-  local selector=$monitor desc
-  desc=$(monitors_json | jq -r --arg m "$monitor" '.[] | select(.name == $m) | .description' || true)
-  [[ -n $desc && $desc != "null" ]] && selector="desc:$desc"
+  local selector; selector=$(selector_for "$monitor")
 
   jq --arg p "$profile" --arg m "$selector" --argjson ws "$wanted" '
     .profiles |= map(
@@ -195,10 +202,13 @@ local profiles = {
 LUA
     jq -r '
       .profiles[] |
+      ((.scrollable // []) | map({ key: ., value: true }) | from_entries) as $scroll |
       "  { name = " + (.name | @json) + ", monitors = {\n" +
       ( .monitors | to_entries | map(
           "    { selector = " + (.key | @json) + ", workspaces = { " +
-          (.value | map(tostring) | join(", ")) + " } }," ) | join("\n") ) +
+          (.value | map(tostring) | join(", ")) +
+          " }, scrollable = " + (if $scroll[.key] then "true" else "false" end) +
+          " }," ) | join("\n") ) +
       "\n  } },"' "$CONFIG"
     local persistent
     persistent=$(jq -r 'if .persistent == false then "false" else "true" end' "$CONFIG")
@@ -236,7 +246,8 @@ local function pick()
     for _, group in ipairs(profile.monitors) do
       local monitor = resolve(group.selector, byName, descs)
       if not monitor then ok = false break end
-      resolved[#resolved + 1] = { monitor = monitor, workspaces = group.workspaces }
+      resolved[#resolved + 1] =
+        { monitor = monitor, workspaces = group.workspaces, scrollable = group.scrollable }
     end
     if ok then return profile.name, resolved end
   end
@@ -245,12 +256,27 @@ end
 
 local active, groups = pick()
 
+-- What a non-scrolling monitor gets. Whatever you have set globally, except
+-- when that is itself `scrolling` — "scrollable off" has to mean tiling, and
+-- then there is no global tiling layout left to fall back to.
+local function tiling_layout()
+  local global = hl.get_config("general.layout")
+  if type(global) ~= "string" or global == "" or global == "scrolling" then return "dwindle" end
+  return global
+end
+
+-- Every rule names a layout, including the non-scrolling ones. Leaving `layout`
+-- off does not restore the default: a reload with no layout in the rule leaves
+-- a workspace sitting in whatever layout it last had, so turning scrollable
+-- back off would be a change you could not undo without a restart.
 if groups then
+  local tiling = tiling_layout()
   for _, group in ipairs(groups) do
     for _, ws in ipairs(group.workspaces) do
       hl.workspace_rule({
         workspace = tostring(ws),
         monitor = group.monitor.name,
+        layout = group.scrollable and "scrolling" or tiling,
         default = true,
         persistent = persistent,
       })
@@ -365,7 +391,8 @@ cmd_menu() {
     echo
     local choice
     choice=$(gum choose --header "Workspaces" \
-      "Assign workspaces to a monitor" "Re-detect monitors (reset)" \
+      "Assign workspaces to a monitor" "Scrolling layout for a monitor" \
+      "Re-detect monitors (reset)" \
       "Apply / reload" "Edit config file" "Quit") || return 0
     case $choice in
       "Assign workspaces to a monitor")
@@ -374,6 +401,12 @@ cmd_menu() {
         wslist=$(gum input --header "Workspaces for $monitor (e.g. 1-4 or 1,2,5)" --placeholder "1-4") || continue
         [[ -z $wslist ]] && continue
         cmd_assign "$monitor" "$wslist" && cmd_apply && gum spin --title "Applied" -- sleep 0.6
+        ;;
+      "Scrolling layout for a monitor")
+        local monitor mode
+        monitor=$(hyprctl monitors -j | jq -r '.[].name' | gum choose --header "Which monitor?") || continue
+        mode=$(printf 'on\noff\n' | gum choose --header "Scrolling layout on $monitor?") || continue
+        cmd_scrollable "$monitor" "$mode" && cmd_apply && gum spin --title "Applied" -- sleep 0.6
         ;;
       "Re-detect monitors (reset)")
         gum confirm "Overwrite $CONFIG from the connected monitors?" || continue
@@ -396,11 +429,13 @@ cmd_menu() {
 # survive those names changing.
 cmd_set_layout() {
   ensure_config
-  local profile="" payload=""
+  local profile="" payload="" scroll=""
   while (($#)); do
     case $1 in
       --profile) profile=${2:?--profile needs a name}; shift 2 ;;
       --base64)  payload=$(base64 -d <<<"${2:?--base64 needs a value}"); shift 2 ;;
+      --scrollable-base64)
+                 scroll=$(base64 -d <<<"${2:?--scrollable-base64 needs a value}"); shift 2 ;;
       *)         payload=$1; shift ;;
     esac
   done
@@ -408,8 +443,9 @@ cmd_set_layout() {
   jq -e 'type == "object"' <<<"$payload" >/dev/null 2>&1 || die "set-layout payload is not a JSON object"
   [[ -z $profile ]] && profile=$(active_profile || die "no profile matches the connected monitors")
 
+  local monitors; monitors=$(monitors_json)
   local mapped
-  mapped=$(jq -n --argjson layout "$payload" --argjson mons "$(monitors_json)" '
+  mapped=$(jq -n --argjson layout "$payload" --argjson mons "$monitors" '
     ( $mons
       | map(select((.description // "") != "") | { key: .name, value: ("desc:" + .description) })
       | from_entries ) as $selector
@@ -421,6 +457,24 @@ cmd_set_layout() {
 
   jq --arg p "$profile" --argjson m "$mapped" '
     .profiles |= map(if .name == $p then .monitors = $m else . end)' "$CONFIG" | write_config
+
+  # Only when it was actually passed. A set-layout from a script has no opinion
+  # about scrolling, and silently clearing the flag would be one.
+  if [[ -n $scroll ]]; then
+    jq -e 'type == "array"' <<<"$scroll" >/dev/null 2>&1 ||
+      die "--scrollable-base64 payload is not a JSON array"
+    local scrollmapped
+    scrollmapped=$(jq -n --argjson names "$scroll" --argjson mons "$monitors" '
+      ( $mons
+        | map(select((.description // "") != "") | { key: .name, value: ("desc:" + .description) })
+        | from_entries ) as $selector
+      | $names | map($selector[.] // .) | unique')
+    jq --arg p "$profile" --argjson s "$scrollmapped" '
+      .profiles |= map(
+        if .name == $p then
+          (if ($s | length) == 0 then del(.scrollable) else .scrollable = $s end)
+        else . end)' "$CONFIG" | write_config
+  fi
 
   say "Replaced the layout of profile '$profile'."
 }
@@ -449,6 +503,33 @@ cmd_hide_empty() {
   say "Hide empty workspaces: $mode"
 }
 
+# Which monitors run the scrolling layout. Stored per profile, because a wide
+# desk monitor and a laptop panel rarely want the same answer.
+cmd_scrollable() {
+  ensure_config
+  local profile=""
+  [[ ${1:-} == --profile ]] && { profile=$2; shift 2; }
+  local monitor=${1:?usage: scrollable [--profile NAME] <monitor> <on|off>}
+  local mode=${2:?usage: scrollable [--profile NAME] <monitor> <on|off>}
+  case $mode in
+    on|true|yes)  mode=true ;;
+    off|false|no) mode=false ;;
+    *) die "scrollable takes 'on' or 'off'" ;;
+  esac
+  [[ -z $profile ]] && profile=$(active_profile || die "no active profile; pass --profile")
+
+  local selector; selector=$(selector_for "$monitor")
+
+  jq --arg p "$profile" --arg m "$selector" --argjson on "$mode" '
+    .profiles |= map(
+      if .name == $p then
+        .scrollable = (((.scrollable // []) - [$m]) + (if $on then [$m] else [] end) | unique)
+        | (if (.scrollable | length) == 0 then del(.scrollable) else . end)
+      else . end)' "$CONFIG" | write_config
+
+  say "Scrolling layout on $monitor in profile '$profile': $mode"
+}
+
 cmd_open() {
   omarchy-shell shell summon "$PLUGIN_ID" '{}' >/dev/null 2>&1 ||
     die "could not summon the overlay (is omarchy-shell running?)"
@@ -466,6 +547,7 @@ omarchy-workspaces — pin Hyprland workspaces to specific monitors
   generate                         Write ~/.config/hypr/workspaces.lua
   apply                            Generate, reload Hyprland, re-home workspaces
   edit                             Open the config in your editor
+  scrollable <monitor> <on|off>    Monitor's workspaces scroll instead of tile
   hide-empty <on|off>              Bar draws only workspaces holding windows
   set-layout --base64 <b64>        Replace a whole profile (used by the overlay)
   menu                             Interactive TUI
@@ -494,6 +576,7 @@ main() {
     edit)     cmd_edit ;;
     menu)     cmd_menu ;;
     open)     cmd_open ;;
+    scrollable) shift; cmd_scrollable "$@" ;;
     hide-empty) shift; cmd_hide_empty "$@" ;;
     set-layout) shift; cmd_set_layout "$@" ;;
     -h|--help|help) usage ;;

@@ -87,6 +87,7 @@ omarchy-workspaces status              # where each workspace lives right now
 omarchy-workspaces list                # every profile and its assignments
 omarchy-workspaces assign DP-7 1-4     # assign; accepts 1-4, 1,2,5, or 0 for 10
 omarchy-workspaces apply               # regenerate rules, reload, re-home
+omarchy-workspaces scrollable DP-5 on  # that monitor's workspaces scroll, not tile
 omarchy-workspaces hide-empty on       # bar draws only workspaces holding windows
 omarchy-workspaces menu                # interactive TUI, for a terminal
 ```
@@ -115,7 +116,8 @@ so you never have to type a monitor description by hand.
         "desc:Lenovo Group Limited T27QD-40 VNACDZ5V": [1, 2, 3, 4],
         "desc:Lenovo Group Limited T27QD-40 VNACDZ1G": [5, 6, 7, 8],
         "desc:AU Optronics B160UAN04.9": [9, 10]
-      }
+      },
+      "scrollable": ["desc:Lenovo Group Limited T27QD-40 VNACDZ1G"]
     },
     { "name": "only-eDP-1", "monitors": { "desc:AU Optronics B160UAN04.9": [1,2,3,4,5,6,7,8,9,10] } }
   ]
@@ -127,6 +129,17 @@ connected is used. Put your most specific profile first.
 
 A monitor key is either a bare output name (`eDP-1`) or `desc:` plus the
 monitor description from `hyprctl monitors`. Prefer `desc:` — output names move.
+
+`scrollable` is optional and lists the monitors whose workspaces use Hyprland's
+`scrolling` layout instead of tiling. It is per profile and per monitor, because
+a wide desk display and a laptop panel rarely want the same answer. The editor
+puts a `⟷ Scroll` toggle on each monitor.
+
+Every generated rule names a layout, including the tiling ones — `general.layout`
+normally, or `dwindle` when that is itself `scrolling`. Leaving the layout out of
+a rule does not restore the default: a reload with no layout leaves a workspace
+in whatever layout it last had, so turning `scrollable` back off would not be
+undoable without a restart.
 
 ## Widget settings
 

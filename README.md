@@ -1,4 +1,4 @@
-# omarchy-workspaces
+# Workspaces per Monitor
 
 Pin Hyprland workspaces to specific monitors, and make each monitor's bar show
 only the workspaces that monitor owns.
@@ -15,10 +15,66 @@ from one config file.
 └───────────────┘ └────────────────┘ └───────┘
 ```
 
+- **Plugin ID:** `io.github.kimm-stensborg.workspaces`
+- **Kinds:** `bar-widget`, `overlay`, `service`
+- **License:** MIT
+- **Requires:** Omarchy 4 (Quattro) with `omarchy-shell`, and Hyprland's Lua config
+
+## Dependencies
+
+All ship with Omarchy and are present on a stock install:
+
+| Package | Used for |
+|---------|----------|
+| `hyprland` | `hyprctl` — reading monitors, reloading, moving workspaces |
+| `jq` | every config read and write in `bin/omarchy-workspaces` |
+| `gum` | the optional terminal TUI (`menu`) only |
+
+Nothing is downloaded or installed at runtime.
+
+## Install
+
+```bash
+omarchy plugin add https://github.com/kimm-stensborg/omarchy-workspaces.git
+omarchy plugin enable io.github.kimm-stensborg.workspaces --section left
+```
+
+`omarchy plugin add` clones into
+`~/.config/omarchy/plugins/io.github.kimm-stensborg.workspaces/` and leaves the
+plugin disabled so the code can be reviewed before it runs. Plugins execute
+unsandboxed inside `omarchy-shell`.
+
+Enabling it is the whole setup. `omarchy plugin add` never runs an install
+hook, so the plugin's `service` does the rest itself the moment it loads:
+
+1. Seeds `~/.config/omarchy/workspaces.json` from your connected monitors,
+   spreading 1–10 evenly across them left to right, if the file does not exist.
+2. Generates `~/.config/hypr/workspaces.lua` from that config.
+3. Appends one guarded `require` line to `~/.config/hypr/hyprland.lua`.
+4. Reloads Hyprland — but only when step 2 or 3 actually changed something, so
+   every later shell start costs a diff and touches nothing.
+
+The service then watches `workspaces.json`, so a hand-edit of that file applies
+on save just as the editor's **Apply** does.
+
+### Putting it in the bar in place of the stock widget
+
+`--section left` drops it at the left edge. To take over the exact slot the
+stock `omarchy.workspaces` occupies today instead, enable it there and turn
+the stock one off:
+
+```bash
+omarchy plugin enable io.github.kimm-stensborg.workspaces --before omarchy.workspaces
+omarchy plugin disable omarchy.workspaces
+```
+
+Disabling a first-party widget only drops it from the bar layout; it stays
+available, so `omarchy plugin enable omarchy.workspaces` puts it back.
+
 ## The editor
 
-**Setup → Workspaces** in the Omarchy menu (or `omarchy-workspaces open`) opens
-a visual editor. Monitors are drawn to scale in their real arrangement, so the
+`omarchy-shell shell summon io.github.kimm-stensborg.workspaces '{}'` opens a
+visual editor. Monitors are drawn to scale in their real arrangement, so the
 picture matches the desk.
 
 ```
@@ -44,6 +100,22 @@ picture matches the desk.
 - **This monitor / All monitors** sets what every bar draws, described below.
 - Nothing is written until **Apply**; `Esc` or **Cancel** throws the edit away.
 
+Add a menu entry by putting this in
+`~/.config/omarchy/extensions/omarchy-menu.jsonc` (it hot-reloads on save),
+which puts it under **Setup → Workspaces**:
+
+```jsonc
+"setup.workspaces": {
+  "icon": "󰕰",
+  "label": "Workspaces",
+  "description": "Pin workspaces to monitors",
+  "aliases": ["workspaces", "monitors"],
+  "action": "omarchy-shell shell summon io.github.kimm-stensborg.workspaces '{}'"
+},
+```
+
+Or bind a key in `~/.config/hypr/bindings.lua`.
+
 ## What it does
 
 - **Pins workspaces to monitors.** Generates Hyprland `workspace_rule` entries
@@ -59,37 +131,30 @@ picture matches the desk.
   monitors are all connected wins, so unplugging everything falls through to a
   laptop-only profile instead of stranding workspaces on a monitor that is gone.
 
-## Install
+## The CLI
+
+`bin/omarchy-workspaces` lives inside the plugin folder rather than on `PATH`,
+so that adding the plugin is the whole install. The overlay and the service
+call it by absolute path. For terminal use, link it yourself:
 
 ```bash
-git clone https://github.com/kimm-stensborg/omarchy-workspaces.git ~/Projects/omarchy-workspaces
-~/Projects/omarchy-workspaces/install.sh
+ln -s ~/.config/omarchy/plugins/io.github.kimm-stensborg.workspaces/bin/omarchy-workspaces \
+      ~/.local/bin/omarchy-workspaces
 ```
 
-The installer links the CLI into `~/.local/bin`, links the plugin into
-`~/.config/omarchy/plugins/`, seeds a config from your connected monitors, adds
-**Setup → Workspaces** to the Omarchy menu, and swaps `omarchy.workspaces` for
-this widget in the bar. It is safe to re-run.
-
-The plugin is two things in one: a `bar-widget` that draws the numbers, and an
-`overlay` that edits them. Both read the same config file, so they cannot
-disagree.
-
-While hacking on it, note that `omarchy-shell shell rescanPlugins` reloads the
-bar widget but not an overlay instance that is already mounted — restart the
-shell (`omarchy restart shell`) after changing `Overlay.qml`.
-
-## Usage
+Do not put that symlink *inside* the plugin folder — `omarchy plugin validate`
+refuses a plugin containing symlinks, and `omarchy plugin update` would fail.
 
 ```bash
-omarchy-workspaces open                # the visual editor
 omarchy-workspaces status              # where each workspace lives right now
 omarchy-workspaces list                # every profile and its assignments
 omarchy-workspaces assign DP-7 1-4     # assign; accepts 1-4, 1,2,5, or 0 for 10
 omarchy-workspaces apply               # regenerate rules, reload, re-home
+omarchy-workspaces bootstrap           # what the service runs; safe any time
 omarchy-workspaces scrollable DP-5 on  # that monitor's workspaces scroll, not tile
 omarchy-workspaces hide-empty on       # bar draws only workspaces holding windows
 omarchy-workspaces menu                # interactive TUI, for a terminal
+omarchy-workspaces open                # the visual editor
 ```
 
 `assign` takes a live output name and stores the stable `desc:` selector for it,
@@ -99,9 +164,10 @@ so you never have to type a monitor description by hand.
 
 | Path | Owner | Purpose |
 |---|---|---|
-| `~/.config/omarchy/workspaces.json` | you | The source of truth. Read by both the Lua generator and the bar widget. |
-| `~/.config/hypr/workspaces.lua` | generated | Workspace rules. **Do not edit** — `apply` overwrites it. |
-| `~/.config/hypr/hyprland.lua` | you | Gets one `require` line appended on first apply. |
+| `~/.config/omarchy/workspaces.json` | you | The source of truth. Read by the Lua generator, the bar widget, and the editor. |
+| `~/.config/hypr/workspaces.lua` | generated | Workspace rules. **Do not edit** — every apply overwrites it. |
+| `~/.config/hypr/hyprland.lua` | you | Gets one guarded `require` line appended once. |
+| `~/.config/omarchy/shell.json` | the shell | Holds the widget's `hideEmpty` setting, inline on its bar entry. |
 
 ### Config shape
 
@@ -163,16 +229,40 @@ monitor change makes a different profile win, it reloads the config; otherwise
 it just walks any drifted workspace back to its home monitor. The reload only
 fires on an actual profile change, so hotplug cannot loop.
 
-## Uninstall
+## Hacking on it
+
+Saving a file anywhere under `~/.config/omarchy/plugins/` reloads plugin code
+automatically, and `omarchy-shell shell rescanPlugins` forces it. That covers
+the bar widget and the service; an overlay instance that is already mounted is
+not re-created, so restart the shell (`omarchy restart shell`) after changing
+`Overlay.qml`.
+
+Before pushing, check the manifest against what the shell will accept:
 
 ```bash
-rm ~/.local/bin/omarchy-workspaces
-rm ~/.config/omarchy/plugins/kimm-stensborg.workspaces
-rm ~/.config/hypr/workspaces.lua
-# then drop the require line from ~/.config/hypr/hyprland.lua,
-# the "setup.workspaces*" rows from ~/.config/omarchy/extensions/omarchy-menu.jsonc,
-# and set the bar widget back to "omarchy.workspaces" in ~/.config/omarchy/shell.json
+omarchy plugin validate .
 ```
+
+## Remove
+
+```bash
+omarchy plugin remove io.github.kimm-stensborg.workspaces
+```
+
+That unloads the widget and the service and deletes the checkout. The files it
+put outside its own folder are yours to clean up:
+
+```bash
+rm ~/.config/hypr/workspaces.lua
+rm ~/.config/omarchy/workspaces.json
+rm -f ~/.local/bin/omarchy-workspaces        # only if you linked it
+# then drop the `require(...).module("hypr.workspaces")` line from
+# ~/.config/hypr/hyprland.lua and reload: hyprctl reload
+```
+
+The `require` is guarded, so leaving it in place is harmless — a missing
+`workspaces.lua` is skipped rather than breaking the config. Your workspaces
+go back to Hyprland's default placement on the next reload either way.
 
 ## License
 

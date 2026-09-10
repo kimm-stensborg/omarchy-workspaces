@@ -14,7 +14,7 @@ import qs.Ui
 // falls back to Hyprland's default placement.
 //
 // Nothing is written until Apply. The whole layout then goes out in a single
-// `omarchy-workspaces set-layout` call, so a half-applied arrangement is not a
+// `set-layout` call to the bundled CLI, so a half-applied arrangement is not a
 // state this can leave behind.
 Item {
   id: root
@@ -23,7 +23,15 @@ Item {
   property var shell: null
   property var manifest: null
 
-  readonly property string pluginId: (manifest && manifest.id) || "kimm-stensborg.workspaces"
+  readonly property string pluginId: (manifest && manifest.id) || "io.github.kimm-stensborg.workspaces"
+  // The CLI ships inside the plugin folder rather than on PATH, so that adding
+  // the plugin is the whole install. Resolve it the way the host tells us where
+  // we were loaded from, and fall back to the conventional location only when
+  // the manifest was not injected.
+  readonly property string pluginDir: root.manifest && root.manifest.__sourceDir
+    ? String(root.manifest.__sourceDir)
+    : Quickshell.env("HOME") + "/.config/omarchy/plugins/" + root.pluginId
+  readonly property string cli: root.pluginDir + "/bin/omarchy-workspaces"
   readonly property string configPath: Quickshell.env("HOME") + "/.config/omarchy/workspaces.json"
 
   property bool opened: false
@@ -303,14 +311,15 @@ Item {
     var scrolling = []
     for (var screen in root.scrollable) if (root.scrollable[screen]) scrolling.push(screen)
 
-    var command = "omarchy-workspaces set-layout --base64 "
+    var run = "bash " + Util.shellQuote(root.cli) + " "
+    var command = run + "set-layout --base64 "
       + Qt.btoa(JSON.stringify(payload))
       + " --scrollable-base64 " + Qt.btoa(JSON.stringify(scrolling)) + " --quiet"
     if (root.hideEmpty !== root.initialHideEmpty)
-      command += " && omarchy-workspaces hide-empty " + (root.hideEmpty ? "on" : "off") + " --quiet"
-    command += " && omarchy-workspaces apply --quiet"
+      command += " && " + run + "hide-empty " + (root.hideEmpty ? "on" : "off") + " --quiet"
+    command += " && " + run + "apply --quiet"
 
-    Quickshell.execDetached(["bash", "-lc", command])
+    Quickshell.execDetached(["bash", "-c", command])
 
     root.dismiss()
   }

@@ -15,7 +15,7 @@ import qs.Ui
 // owns — and shows them whether or not they currently hold a window.
 BarWidget {
   id: root
-  moduleName: "kimm-stensborg.workspaces"
+  moduleName: "io.github.kimm-stensborg.workspaces"
 
   readonly property string configPath: Quickshell.env("HOME") + "/.config/omarchy/workspaces.json"
 

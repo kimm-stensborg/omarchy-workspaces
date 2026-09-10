@@ -1,20 +1,23 @@
 {
   "schemaVersion": 1,
-  "id": "kimm-stensborg.workspaces",
-  "name": "Workspaces per monitor",
+  "id": "io.github.kimm-stensborg.workspaces",
+  "name": "Workspaces per Monitor",
   "version": "1.0.0",
-  "author": "kimm-stensborg",
-  "description": "Pins workspaces to monitors and shows each monitor's own workspaces in its bar",
+  "author": "Kimm Stensborg",
+  "license": "MIT",
+  "description": "Pins workspaces to monitors and shows each monitor its own workspaces in the bar",
   "kinds": [
     "bar-widget",
-    "overlay"
+    "overlay",
+    "service"
   ],
   "entryPoints": {
     "barWidget": "Workspaces.qml",
-    "overlay": "Overlay.qml"
+    "overlay": "Overlay.qml",
+    "service": "Service.qml"
   },
   "barWidget": {
-    "displayName": "Workspaces per monitor",
+    "displayName": "Workspaces per Monitor",
     "description": "Workspace indicators filtered to the monitor the bar is on",
     "category": "Compositor",
     "allowMultiple": false,

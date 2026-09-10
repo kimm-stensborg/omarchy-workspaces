@@ -5,7 +5,7 @@
   "version": "1.1.0",
   "author": "Kimm Stensborg",
   "license": "MIT",
-  "description": "Pins workspaces to monitors and shows each monitor its own workspaces in the bar",
+  "description": "Pins workspaces to monitors, shows each monitor its own workspaces in the bar, and rearranges the monitors by drag",
   "kinds": [
     "bar-widget",
     "overlay",

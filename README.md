@@ -251,6 +251,13 @@ the bar widget and the service; an overlay instance that is already mounted is
 not re-created, so restart the shell (`omarchy restart shell`) after changing
 `Overlay.qml`.
 
+Restart it after editing `kinds` in the manifest too. The shell builds one
+loader per panel/overlay/menu plugin when its plugin list changes, but skips
+that rebuild while a hot-reload is in flight — so a kind declared during a
+reload gets no loader, and summoning it returns `ok` and does nothing at all,
+with no error anywhere to explain why. A fresh `omarchy plugin add` is fine;
+this only bites while editing a plugin in place.
+
 Before pushing, check the manifest against what the shell will accept:
 
 ```bash

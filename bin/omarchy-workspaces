@@ -415,6 +415,41 @@ local function rehome()
   end
 end
 
+-- A monitor that comes back is handed a fresh workspace of its own, and it
+-- stays there after rehome brings its real ones back, showing a workspace the
+-- layout never mentions. Show the first one it owns instead, then put focus
+-- back: no dispatcher changes another monitor's workspace without focusing
+-- it. Omarchy's laptop-display toggle brings a screen back with a reload, not
+-- a hotplug event, so this runs on every settle — and only ever leaves an
+-- empty workspace, which costs nothing, so a reload never takes a screen off
+-- something someone was using.
+local function reveal()
+  local current = placement()
+  if not current then return end
+
+  local owned = {}
+  for _, group in ipairs(current) do
+    for _, ws in ipairs(group.workspaces) do owned[ws] = group end
+  end
+
+  local focused = hl.get_active_workspace()
+  local switched = false
+  for _, group in ipairs(current) do
+    local active = group.monitor.active_workspace
+    if active and active.id > 0 and active.windows == 0 and owned[active.id] ~= group
+      and group.workspaces[1] then
+      hl.dispatch(hl.dsp.focus({ workspace = tostring(group.workspaces[1]) }))
+      switched = true
+    end
+  end
+
+  -- If the stray workspace was the focused one, focus stays where it landed:
+  -- going back would only create it again.
+  if switched and focused and owned[focused.id] then
+    hl.dispatch(hl.dsp.focus({ workspace = tostring(focused.id) }))
+  end
+end
+
 -- A disabled workspace has to be unreachable, not merely unpinned: with the
 -- key still bound, SUPER+4 would create workspace 4 on whatever monitor is
 -- focused, which is the placement this plugin exists to prevent. Only the
@@ -454,6 +489,7 @@ local function settle()
   apply_rules()
   apply_binds()
   rehome()
+  reveal()
 end
 
 hl.timer(settle, { timeout = 500, type = "oneshot" })

@@ -102,16 +102,14 @@ picture matches the desk.
 │                                                                │
 │  ┌── DP-7 ───────────┐┌── DP-5 ───────────┐┌ eDP-1 ──────┐   │
 │  │ 2560 x 1440        ││ 2560 x 1440        ││ 1920 x 1200 │   │
-│  │ 1  2  3 (4)        ││ 5  6· 7  8         ││ 9  0        │   │
+│  │ 1  2  3 (4)        ││ 5  6  7  8         ││ 9  0        │   │
 │  └────────────────────┘└────────────────────┘└─────────────┘   │
 │                                                                │
-│  Profile: all-monitors              [Identify][Cancel][Apply]  │
+│                                     [Identify][Cancel][Apply]  │
 └────────────────────────────────────────────────────────────────┘
 ```
 
-`(4)` is switched off: an outline with a line through it, and no keybinding. A
-dot in a pill's corner (`6·`) means `SUPER+L` has pinned that workspace's
-layout against the global one.
+`(4)` is switched off: an outline with a line through it, and no keybinding.
 
 - **Drag** a workspace chip from one monitor to another.
 - **Click** a chip to switch that workspace off — or press its number key.
@@ -378,7 +376,9 @@ for a workspace with no keybinding would offer something that does not work.
 
 Layout is per workspace. `SUPER+L` toggles the one you are on between tiling
 and scrolling; anything you have not touched follows Hyprland's global
-`general.layout`. The editor marks a workspace carrying an override with a dot.
+`general.layout`. The editor does not show which workspaces carry one — layout is not what a
+picture of which-workspace-lives-where is about. `doctor` prints the live
+layout of each, and the config lists them.
 
 ```bash
 omarchy-workspaces layout 6 scrolling      # pin one workspace

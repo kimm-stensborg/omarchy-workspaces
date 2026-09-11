@@ -1140,10 +1140,37 @@ Item {
               border.width: targeted || lifted ? 2 : 1
               border.color: targeted || lifted ? root.accent : root.hairline
 
+              // The number Identify puts on the glass, so the two pictures can
+              // be matched up. Pointless with one screen — there is nothing to
+              // tell apart — so it only appears once there are two.
+              Rectangle {
+                visible: root.monitors.length > 1
+                anchors.top: parent.top
+                anchors.right: parent.right
+                anchors.margins: Style.spacing.sm
+                width: Math.max(badge.implicitWidth + Style.spacing.sm, badge.implicitHeight + Style.spacing.xxs * 2)
+                height: badge.implicitHeight + Style.spacing.xxs * 2
+                radius: Style.cornerRadius
+                color: "transparent"
+                border.width: 1
+                border.color: root.hairline
+
+                Text {
+                  id: badge
+                  anchors.centerIn: parent
+                  text: String(root.monitorIndex(screenCard.monitorName))
+                  color: root.foreground
+                  opacity: 0.55
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  textFormat: Text.PlainText
+                }
+              }
+
               // Dragging the monitor itself rearranges the desk. Declared
-              // before the contents, so the chips and the layout toggle drawn
-              // above it get their own presses first and this only ever sees
-              // one aimed at bare monitor.
+              // before the contents, so the chips drawn above it get their own
+              // presses first and this only ever sees one aimed at bare
+              // monitor.
               MouseArea {
                 anchors.fill: parent
                 enabled: root.monitors.length > 1

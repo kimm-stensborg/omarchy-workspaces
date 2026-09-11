@@ -100,7 +100,7 @@ picture matches the desk.
 │  Drag a workspace to another monitor, or a monitor to           │
 │  rearrange the desk. Click a workspace to switch it off.        │
 │                                                                │
-│  ┌── DP-7 ───────────┐┌── DP-5 ───────────┐┌ eDP-1 ──────┐   │
+│  ┌── DP-7 ────────[1]┐┌── DP-5 ────────[2]┐┌ eDP-1 ───[3]┐   │
 │  │ 2560 x 1440        ││ 2560 x 1440        ││ 1920 x 1200 │   │
 │  │ 1  2  3 (4)        ││ 5  6  7  8         ││ 9  0        │   │
 │  └────────────────────┘└────────────────────┘└─────────────┘   │
@@ -120,6 +120,8 @@ picture matches the desk.
   There is no button for it, because it is not a thing you should need twice.
 - **Identify** puts a big number and connector name on each physical screen for
   three seconds, so you can tell which `DP-` is which without counting cables.
+  The same number sits in the corner of each card here, which is what makes the
+  two pictures line up. It is hidden when there is only one screen.
 - **Hide empty** sets what every bar draws, described under *Widget settings*.
 - Nothing is written until **Apply**; `Esc` or **Cancel** throws the edit away.
 

@@ -65,23 +65,27 @@ has "a non-array disabled is refused" \
 has "a non-object layout is refused" "$(run set-layout --base64 "$(b64 '[1,2]')")" "not a JSON object"
 
 echo
-echo "per-workspace layout"
+echo "layout is handed back to Omarchy, not kept"
+STATE="$WORK/state"
+hand() { rm -rf "$STATE"; mkdir -p "$STATE"
+  OMARCHY_WORKSPACES_CONFIG="$WORK/ws.json" OMARCHY_WORKSPACE_LAYOUTS="$STATE" \
+    bash "$CLI" list >/dev/null 2>&1; }
+printf '%s' '{"version":1,"monitors":{"A":[1,2]},"layouts":{"2":"scrolling"}}' >"$WORK/ws.json"
+hand
+is "the key leaves the config"     "$(cfg '. | has("layouts")')" 'false'
+is "and lands where SUPER+L looks" "$(cat "$STATE/2.lua" 2>/dev/null)" \
+  'hl.workspace_rule({ workspace = "2", layout = "scrolling" })'
+printf '%s' '{"version":1,"profiles":[{"name":"d","monitors":{"A":[1],"B":[2,3]},"scrollable":["B"]}]}' >"$WORK/ws.json"
+hand
+is "the old per-monitor form too"  "$(cat "$STATE/3.lua" 2>/dev/null)" \
+  'hl.workspace_rule({ workspace = "3", layout = "scrolling" })'
+is "and it leaves nothing behind"  "$(cfg '. | has("scrollable")')" 'false'
 seed
-run layout 2 scrolling >/dev/null
-is "an override is stored"        "$(cfg '.layouts')" '{"2":"scrolling"}'
-run layout 2 default >/dev/null
-is "default clears the entry"     "$(cfg '. | has("layouts")')" 'false'
-has "a junk layout is refused"    "$(run layout 2 sideways)" "scrolling, dwindle, or default"
-has "a junk workspace is refused" "$(run layout nine dwindle)" "not a workspace number"
-seed
-run layout 0 scrolling >/dev/null
-is "0 means ten here too"         "$(cfg '.layouts')" '{"10":"scrolling"}'
-seed
-run layout 2 scrolling >/dev/null
-run set-layout --base64 "$(b64 '{"L":[1,2]}')" >/dev/null
-is "the editor does not drop overrides" "$(cfg '.layouts')" '{"2":"scrolling"}'
+hand
+is "a clean config hands nothing"  "$(ls "$STATE" | wc -l | tr -d ' ')" '0'
 
 echo
+echo "generated lua"echo
 echo "generated lua"
 seed
 run disable 3 >/dev/null; run generate >/dev/null
@@ -91,45 +95,14 @@ has "lists the disabled workspace"   "$LUA" 'local disabled_list = { 3 }'
 has "keeps the desc: selector"       "$LUA" 'selector = "desc:Left Panel L1"'
 has "re-asserts after settling"      "$LUA" "hl.timer(settle"
 has "unbinds all three variants"     "$LUA" 'hl.unbind("SUPER + SHIFT + ALT + " .. code)'
-has "takes SUPER+L off Omarchy"      "$LUA" 'hl.unbind("SUPER + L")'
-has "points SUPER+L at this plugin"  "$LUA" "toggle-layout"
-has "names the script by absolute path" "$LUA" "local toggle_cmd = \"bash '/"
-seed
-run layout 4 scrolling >/dev/null; run generate >/dev/null
-has "carries the layout override"    "$(cat "$WORK/ws.lua")" '[4] = "scrolling"'
-has "layout comes from the override" "$(cat "$WORK/ws.lua")" 'local function layout_for'
+hasnt "leaves SUPER+L alone"         "$LUA" 'SUPER + L'
+hasnt "sets no tiling layout at all" "$LUA" 'layout ='""
+
 if command -v luac >/dev/null; then
   luac -p "$WORK/ws.lua" 2>/dev/null && ok "is valid Lua" || no "is valid Lua" "parses" "syntax error"
 else
   printf '  - skipped: luac not installed (is valid Lua)\n'
 fi
-
-echo
-echo "scrollable migration"
-cat >"$WORK/ws.json" <<'JSON'
-{ "version": 1, "persistent": true,
-  "profiles": [ { "name": "desk",
-    "monitors": { "desc:Left Panel L1": [1,2], "desc:Right Panel R1": [3,4] },
-    "scrollable": ["desc:Right Panel R1"] } ] }
-JSON
-run list >/dev/null 2>&1
-is "the legacy key is gone"        "$(cfg '. | has("scrollable")')" 'false'
-is "its monitor became overrides"  "$(cfg '.layouts')" '{"3":"scrolling","4":"scrolling"}'
-
-run list >/dev/null 2>&1
-is "migrating twice changes nothing" "$(cfg '.layouts')" '{"3":"scrolling","4":"scrolling"}'
-
-cat >"$WORK/ws.json" <<'JSON'
-{ "version": 1, "persistent": true,
-  "profiles": [ { "name": "desk",
-    "monitors": { "desc:Left Panel L1": [1,2], "desc:Right Panel R1": [3,4] },
-    "scrollable": ["desc:Right Panel R1"], "layouts": { "3": "dwindle" } } ] }
-JSON
-run list >/dev/null 2>&1
-is "an explicit override outlives the fold" "$(cfg '.layouts')" '{"3":"dwindle","4":"scrolling"}'
-seed
-run list >/dev/null 2>&1
-is "a config without it is untouched" "$(cfg '. | has("layouts")')" 'false'
 
 echo
 echo "workspace count"
@@ -156,9 +129,8 @@ echo "the layout is checked on paper, before any screen"
 doc() { OMARCHY_WORKSPACES_CONFIG="$WORK/ws.json" bash "$CLI" doctor 2>&1; }
 printf '%s' '{"version":1,"monitors":{"A":[1,2],"B":[2,3]}}' >"$WORK/ws.json"
 has "a workspace on two monitors"  "$(doc)" "workspace 2 is on two monitors"
-printf '%s' '{"version":1,"monitors":{"A":[1,2]},"disabled":[7],"layouts":{"9":"scrolling"}}' >"$WORK/ws.json"
+printf '%s' '{"version":1,"monitors":{"A":[1,2]},"disabled":[7]}' >"$WORK/ws.json"
 has "disabled pointing nowhere"    "$(doc)" "disabled workspace 7 is not in the layout"
-has "a layout pointing nowhere"    "$(doc)" "layout pinned for workspace 9"
 seed
 hasnt "a sound layout is quiet"    "$(doc)" "is on two monitors"
 

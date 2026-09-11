@@ -35,7 +35,7 @@ say() { ((QUIET)) || echo "$@"; }
 ensure_config() {
   [[ -f $CONFIG ]] || die "no config at $CONFIG — run '$0 bootstrap' first"
   jq -e '.version == 1' "$CONFIG" >/dev/null 2>&1 || die "$CONFIG is not a version 1 config"
-  migrate_scrollable
+  migrate_layouts
   migrate_profiles
 }
 
@@ -58,30 +58,49 @@ migrate_profiles() {
     | del(.profiles)
     | .monitors = ($best.monitors // {})
     | (if (($best.disabled // []) | length) > 0 then .disabled = $best.disabled else . end)
-    | (if (($best.layouts // {}) | length) > 0 then .layouts = $best.layouts else . end)
   ' "$CONFIG" | write_config
   say "Collapsed the saved layout list into one layout; monitors that go missing now reflow."
 }
 
-# Layout used to be settable per monitor as well as per workspace. Two controls
-# for one property is one too many now that SUPER+L writes the per-workspace
-# one, so the monitor-level setting is gone — but dropping it silently would
-# change what a screen is doing. Fold it down instead: every workspace on a
-# monitor that was set to scroll gets that as its own override, which is the
-# same picture expressed the one remaining way. Runs once; the key is removed
-# after, so this is a no-op on every later call.
-migrate_scrollable() {
-  jq -e 'any((.profiles // [])[]; has("scrollable"))' "$CONFIG" >/dev/null 2>&1 || return 0
-  jq '
-    .profiles |= map(
-      if has("scrollable") then
-        . as $p
-        | (($p.scrollable // []) | map($p.monitors[.] // []) | add // []) as $ws
-        | .layouts = (($ws | map({ (tostring): "scrolling" }) | add // {}) + (.layouts // {}))
-        | del(.scrollable)
-        | (if (.layouts | length) == 0 then del(.layouts) else . end)
-      else . end)' "$CONFIG" | write_config
-  say "Folded the per-monitor scroll setting into per-workspace layouts."
+# Which layout a workspace tiles with is Omarchy's business: SUPER+L toggles
+# it and saves the result under ~/.local/state/omarchy/workspace-layouts. This
+# plugin used to own that too, first per monitor and then per workspace, which
+# meant two things writing the same property and a long argument about whose
+# answer survived a reload. It places workspaces on monitors; that is all.
+#
+# Anything a previous version recorded is handed back rather than dropped, by
+# writing it where SUPER+L would have, so the screen keeps doing what it did.
+LAYOUT_STATE="${OMARCHY_WORKSPACE_LAYOUTS:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/workspace-layouts}"
+
+migrate_layouts() {
+  jq -e 'has("layouts") or any((.profiles // [])[]; has("scrollable")) or has("scrollable")' \
+    "$CONFIG" >/dev/null 2>&1 || return 0
+
+  local handed=0 ws layout
+  while IFS=$'\t' read -r ws layout; do
+    [[ -n $ws && -n $layout ]] || continue
+    mkdir -p "$LAYOUT_STATE"
+    printf 'hl.workspace_rule({ workspace = "%s", layout = "%s" })\n' "$ws" "$layout" \
+      >"$LAYOUT_STATE/$ws.lua"
+    handed=$((handed + 1))
+  done < <(jq -r '
+    # Both shapes: the per-workspace map, and the older per-monitor list whose
+    # monitors each imply scrolling for everything they hold.
+    ((.layouts // {}) | to_entries | map({ ws: .key, layout: .value })) as $direct
+    | ([ (.profiles // [.])[]
+         | . as $p
+         | (($p.scrollable // []) | map($p.monitors[.] // []) | add // [])[]
+         | { ws: (. | tostring), layout: "scrolling" } ]) as $viaMonitor
+    | ($viaMonitor + $direct)
+    | unique_by(.ws)
+    | .[] | .ws + "\t" + .layout' "$CONFIG")
+
+  jq 'del(.layouts) | del(.scrollable)
+      | (if has("profiles") then .profiles |= map(del(.layouts) | del(.scrollable)) else . end)' \
+    "$CONFIG" | write_config
+
+  ((handed)) && say "Handed $handed workspace layout(s) back to Omarchy's SUPER+L; this plugin no longer sets layouts."
+  return 0
 }
 
 write_config() { # stdin = new json
@@ -137,15 +156,13 @@ cmd_list() {
   echo
   jq -r '
     ((.disabled // []) | map({ key: (. | tostring), value: true }) | from_entries) as $off
-    | ((.layouts // {})) as $lay
     | .monitors | to_entries[]
     | "  " + (.key | if startswith("desc:") then ltrimstr("desc:") else . end)
       + "\n      " + ([.value[]
           | (if . == 10 then "0" else tostring end) as $label
-          | (if $off[. | tostring] then "(" + $label + ")" else $label end)
-            + (if $lay[. | tostring] then ":" + $lay[. | tostring] else "" end)] | join("  "))
+          | (if $off[. | tostring] then "(" + $label + ")" else $label end)] | join("  "))
       + "\n"' "$CONFIG"
-  echo "  (n) is switched off. n:layout is pinned away from the global layout."
+  echo "  (n) is switched off."
   echo
 }
 
@@ -227,25 +244,6 @@ selector_of() {
     '.monitors | to_entries[] | select(.value | index($w)) | .key' "$CONFIG"
 }
 
-# Omarchy's SUPER+L toggle saves a per-workspace layout to
-# ~/.local/state/omarchy/workspace-layouts/<id>.lua, and `default.hypr.toggles`
-# loads that directory after hypr/workspaces.lua — so a stale file outranks the
-# rules generated here on every reload, forever. Clearing the ones covering our
-# own workspaces at apply time is what makes this plugin's layouts mean
-# something. SUPER+L keeps working; its choice just stops outliving an apply.
-LAYOUT_STATE="${OMARCHY_WORKSPACE_LAYOUTS:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/workspace-layouts}"
-
-clear_layout_overrides() {
-  [[ -d $LAYOUT_STATE ]] || return 0
-  local ws cleared=0
-  while IFS= read -r ws; do
-    [[ -f "$LAYOUT_STATE/$ws.lua" ]] || continue
-    rm -f "$LAYOUT_STATE/$ws.lua" && cleared=$((cleared + 1))
-  done < <(managed_workspaces || true)
-  ((cleared)) && say "Cleared $cleared saved SUPER+L layout override(s)."
-  return 0
-}
-
 # Turn workspaces on or off. A disabled workspace keeps its place on a monitor
 # — the editor still draws the pill there — but gets no rule and no keybinding,
 # so it cannot be reached or created at all.
@@ -296,18 +294,13 @@ LUA
 }
 LUA
     jq -r '
-      "local disabled_list = { " + (((.disabled // []) | map(tostring)) | join(", ")) + " }\n" +
-      "local overrides = { " +
-      (((.layouts // {}) | to_entries | map("[" + .key + "] = " + (.value | @json))) | join(", ")) +
-      " }"' "$CONFIG"
-    local persistent self
+      "local disabled_list = { " + (((.disabled // []) | map(tostring)) | join(", ")) + " }"' "$CONFIG"
+    local persistent
     persistent=$(jq -r 'if .persistent == false then "false" else "true" end' "$CONFIG")
-    self=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")
     cat <<LUA
 
 local persistent = $persistent
 local key_slots = $KEY_SLOTS
-local toggle_cmd = "bash '$self' toggle-layout"
 LUA
     cat <<'LUA'
 
@@ -380,42 +373,18 @@ end
 
 local groups = placement()
 
--- What a workspace gets with no override of its own: whatever you have set
--- globally, except when that is itself `scrolling` — a workspace toggled off
--- scrolling has to land on tiling, and then there is no global tiling layout
--- left to fall back to.
-local function tiling_layout()
-  local global = hl.get_config("general.layout")
-  if type(global) ~= "string" or global == "" or global == "scrolling" then return "dwindle" end
-  return global
-end
-
--- Every rule names a layout, including the non-scrolling ones. Leaving `layout`
--- off does not restore the default: a reload with no layout in the rule leaves
--- a workspace sitting in whatever layout it last had, so toggling scrolling
--- back off would be a change you could not undo without a restart.
---
--- A disabled workspace gets no rule at all. Nothing pins it, nothing makes it
--- persistent, so it never appears on a bar or in the workspace list; its keys
--- are unbound further down.
--- Layout is per workspace and nothing else. SUPER+L writes these overrides;
--- anything without one follows the global layout.
-local function layout_for(ws, tiling)
-  local own = overrides[ws]
-  if type(own) == "string" and own ~= "" then return own end
-  return tiling
-end
-
+-- Which layout a workspace tiles with is deliberately not set here. Naming it
+-- would overwrite whatever SUPER+L last chose on every reload, and that key is
+-- Omarchy's, saved in its own state directory and applied after this file.
+-- Leaving it out is what lets the two coexist.
 local function apply_rules()
   if not groups then return end
-  local tiling = tiling_layout()
   for _, group in ipairs(groups) do
     for _, ws in ipairs(group.workspaces) do
       if not disabled[ws] then
         hl.workspace_rule({
           workspace = tostring(ws),
           monitor = group.monitor.name,
-          layout = layout_for(ws, tiling),
           default = true,
           persistent = persistent,
         })
@@ -474,23 +443,10 @@ local function apply_binds()
     end
   end
 
-  -- Omarchy binds SUPER+L to its own layout toggle, which saves the result to
-  -- ~/.local/state/omarchy/workspace-layouts and is loaded after this file --
-  -- so left alone it would keep writing a second, competing answer that wins
-  -- on every reload. Point the same key at the same job done against this
-  -- plugin's config instead. The key still toggles the active workspace
-  -- between tiling and scrolling; only the place it records that changes.
-  hl.unbind("SUPER + L")
-  hl.bind("SUPER + L", hl.dsp.exec_cmd(toggle_cmd), { description = "Toggle workspace layout" })
 end
 
--- Omarchy's own SUPER+L layout toggle persists its choice to
--- ~/.local/state/omarchy/workspace-layouts/<id>.lua, and `default.hypr.toggles`
--- requires that directory *after* this file, so on every reload those saved
--- overrides land on top of the rules above and silently win. Re-asserting once
--- the config has settled puts this plugin's answer last, which is what makes
--- the layout overrides stick. SUPER+L still works live; it just no longer
--- outlives the next apply.
+-- Rules are re-asserted once the config has settled, because plenty of things
+-- load after this file and a workspace can be created in between.
 local function settle()
   apply_rules()
   apply_binds()
@@ -572,7 +528,6 @@ reload_hyprland() {
 cmd_apply() {
   cmd_generate
   ensure_required || true
-  clear_layout_overrides
   reload_hyprland
   # Nudge already-open workspaces onto their home monitor right away rather
   # than waiting for the lua timer.
@@ -641,77 +596,6 @@ cmd_bootstrap() {
   fi
 }
 
-# ── per-workspace layout ─────────────────────────────────────────────────────
-
-# What a workspace shows with no override: the global layout, or dwindle when
-# that is itself scrolling, since "not scrolling" has to mean something.
-default_layout() {
-  local global
-  global=$(hyprctl getoption general:layout -j 2>/dev/null | jq -r '.str // ""')
-  [[ -z $global || $global == "scrolling" ]] && echo dwindle || echo "$global"
-}
-
-effective_layout() {
-  local own
-  own=$(jq -r --arg w "$1" '.layouts[$w] // ""' "$CONFIG")
-  [[ -n $own ]] && echo "$own" || default_layout
-}
-
-# Pin one workspace to a layout, or hand it back to the global one.
-cmd_layout() {
-  ensure_config
-  local ws=${1:?usage: layout <workspace> <scrolling|dwindle|default>}
-  local want=${2:?usage: layout <workspace> <scrolling|dwindle|default>}
-  [[ $ws =~ ^[0-9]+$ ]] || die "not a workspace number: '$ws'"
-  ((ws == 0)) && ws=$KEY_SLOTS
-
-  case $want in
-    default|auto|clear)
-      jq --arg w "$ws" '
-        .layouts = ((.layouts // {}) | del(.[$w]))
-        | (if (.layouts | length) == 0 then del(.layouts) else . end)' "$CONFIG" | write_config
-      say "Workspace $ws follows the global layout again." ;;
-    scrolling|dwindle|master)
-      jq --arg w "$ws" --arg v "$want" '
-        .layouts = ((.layouts // {}) + { ($w): $v })' "$CONFIG" | write_config
-      say "Workspace $ws pinned to $want." ;;
-    *) die "layout takes scrolling, dwindle, or default" ;;
-  esac
-}
-
-# What SUPER+L runs. Omarchy's own toggle saves to a state directory this
-# plugin cannot see into without a fight; this does the same job against the
-# one config that is already the source of truth, so the two stop disagreeing.
-#
-# It runs on a keypress, so it stays off the slow paths: no `apply`, no
-# `hyprctl reload`. The rule goes in live, and the generated Lua is rewritten
-# to match *before* the config is saved, so the service's watcher finds nothing
-# to reconcile and does not bounce the compositor a second later.
-cmd_toggle_layout() {
-  ensure_config
-  local ws current next
-  ws=$(hyprctl activeworkspace -j | jq -r '.id')
-  [[ $ws =~ ^[0-9]+$ ]] || die "no active workspace"
-
-  current=$(effective_layout "$ws")
-  [[ $current == scrolling ]] && next=dwindle || next=scrolling
-
-  # An override equal to the global layout is noise in the config, so a toggle
-  # back to the default clears the entry rather than restating it.
-  if [[ $next == "$(default_layout)" ]]; then
-    QUIET=1 cmd_layout "$ws" default
-  else
-    QUIET=1 cmd_layout "$ws" "$next"
-  fi
-
-  QUIET=1 cmd_generate
-  hyprctl eval "hl.workspace_rule({ workspace = \"$ws\", layout = \"$next\" })" >/dev/null 2>&1
-
-  omarchy-cmd-present omarchy-notification-send &&
-    omarchy-notification-send -g 󱂬 "Workspace $ws layout set to $next" >/dev/null 2>&1
-  say "Workspace $ws is now $next."
-}
-
 # ── doctor ───────────────────────────────────────────────────────────────────
 #
 # Compare what the config asks for against what Hyprland is actually doing.
@@ -725,14 +609,6 @@ cmd_toggle_layout() {
 #
 # So: ask, do not assume. Exit 1 on any drift so `apply` can refuse to claim
 # success and a keybinding or hook can notice too.
-
-# The layout a non-scrolling monitor should be showing. Mirrors tiling_layout()
-# in the generated Lua — keep the two in step.
-expected_tiling() {
-  local global
-  global=$(hyprctl getoption general:layout -j 2>/dev/null | jq -r '.str // ""')
-  if [[ -z $global || $global == "scrolling" ]]; then echo "dwindle"; else echo "$global"; fi
-}
 
 DOCTOR_PROBLEMS=0
 ok()    { say "  ✓ $*"; }
@@ -750,30 +626,12 @@ cmd_doctor() {
   else
     local tmp live; tmp=$(mktemp); live="$GENERATED"
     GENERATED="$tmp" QUIET=1 cmd_generate
-    # The generated file embeds the absolute path of whichever copy of this
-    # script wrote it, so a repo checkout and the installed plugin produce
-    # files that differ on that line and nothing else. Comparing it would
-    # report "stale" whenever the two are not the same copy, which is a false
-    # alarm, and a check that cries wolf is worse than no check. The path is
-    # verified on its own terms just below instead.
-    if diff -q <(grep -v '^local toggle_cmd = ' "$tmp") \
-               <(grep -v '^local toggle_cmd = ' "$live") >/dev/null 2>&1; then
+    if diff -q "$tmp" "$live" >/dev/null 2>&1; then
       ok "workspaces.lua matches the config"
     else
       bad "workspaces.lua is stale — the config changed since the last apply"
     fi
     rm -f "$tmp"
-
-    # What that line points at has to exist, or SUPER+L does nothing.
-    local bound_to
-    bound_to=$(sed -n "s/^local toggle_cmd = \"bash '\(.*\)' toggle-layout\"$/\1/p" "$live")
-    if [[ -z $bound_to ]]; then
-      bad "workspaces.lua has no SUPER+L command in it"
-    elif [[ ! -r $bound_to ]]; then
-      bad "SUPER+L points at $bound_to, which is not there"
-    else
-      ok "SUPER+L points at a script that exists"
-    fi
   fi
 
   grep -q 'hypr.workspaces' "$HOME/.config/hypr/hyprland.lua" 2>/dev/null \
@@ -797,10 +655,6 @@ cmd_doctor() {
             | if length > 0 then
                 [ "disabled workspace " + (map(tostring) | join(", ")) + " is not in the layout" ]
               else [] end )
-        + ( (((.layouts // {}) | keys | map(tonumber)) - ($all | unique)) | sort
-            | if length > 0 then
-                [ "layout pinned for workspace " + (map(tostring) | join(", ")) + ", which is not in the layout" ]
-              else [] end )
         + ( if ((.monitors // {}) | length) == 0 then [ "the layout places no workspaces at all" ] else [] end )
       ) | .[]' "$CONFIG")
 
@@ -819,33 +673,16 @@ cmd_doctor() {
     return 1
   fi
 
-  # ── Omarchy's SUPER+L overrides outrank us, so any survivor is a problem ──
-  local stale=() ws
-  while IFS= read -r ws; do
-    [[ -f "$LAYOUT_STATE/$ws.lua" ]] && stale+=("$ws")
-  done < <(managed_workspaces || true)
-  if ((${#stale[@]})); then
-    bad "saved SUPER+L layout override(s) outrank this plugin: workspace ${stale[*]}"
-  else
-    ok "no competing SUPER+L layout overrides"
-  fi
-
-  if hyprctl binds -j | jq -e '[.[] | select(.description == "Toggle workspace layout")] | length == 1' >/dev/null; then
-    ok "SUPER+L is bound to this plugin's layout toggle"
-  else
-    bad "SUPER+L is not bound to this plugin — Omarchy's toggle will write a competing answer"
-  fi
-
   # ── live state, gathered once ─────────────────────────────────────────────
-  local live_place live_layout live_binds tiling
+  local live_place live_exists live_binds
   live_place=$(hyprctl workspaces -j | jq -r '[.[] | select(.id > 0) | "\(.id)=\(.monitor)"] | join(" ")')
-  live_layout=$(hyprctl repl "local o = {} for i = 1, $KEY_SLOTS do local w = hl.get_workspace(tostring(i))
-    o[#o+1] = i .. \"=\" .. (w and tostring(w.tiled_layout) or \"gone\") end return table.concat(o, \" \")" 2>/dev/null)
+  live_exists=$(hyprctl repl "local o = {} for i = 1, $KEY_SLOTS do
+    o[#o+1] = i .. \"=\" .. (hl.get_workspace(tostring(i)) and \"yes\" or \"gone\") end
+    return table.concat(o, \" \")" 2>/dev/null)
   live_binds=$(hyprctl binds -j | jq -r '[.[] | select(.description | test("^Switch to workspace "))
     | (.description | sub("^Switch to workspace ";""))] | join(" ")')
-  tiling=$(expected_tiling)
 
-  local misplaced=() wronglayout=() stillbound=() unbound=() pinned=0 off=0
+  local misplaced=() stillbound=() unbound=() pinned=0 off=0
   for ws in $(managed_workspaces); do
     local sel; sel=$(selector_of "$ws")
     [[ -z $sel ]] && continue
@@ -859,7 +696,7 @@ cmd_doctor() {
     if [[ $is_off == true ]]; then
       off=$((off + 1))
       [[ $bound == true ]] && stillbound+=("$ws")
-      [[ " $live_layout " == *" $ws=gone "* ]] || misplaced+=("$ws exists but is switched off")
+      [[ " $live_exists " == *" $ws=gone "* ]] || misplaced+=("$ws exists but is switched off")
       continue
     fi
 
@@ -873,15 +710,9 @@ cmd_doctor() {
     actual=$(sed -n "s/.*\b$ws=\([^ ]*\).*/\1/p" <<<"$live_place")
     [[ -n $actual && $actual != "$home" ]] && misplaced+=("$ws on $actual, home is $home")
 
-    local want own
-    own=$(jq -r --arg w "$ws" '.layouts[$w] // ""' "$CONFIG")
-    [[ -n $own ]] && want="$own" || want="$tiling"
-    local got; got=$(sed -n "s/.*\b$ws=\([^ ]*\).*/\1/p" <<<"$live_layout")
-    [[ -n $got && $got != "gone" && $got != "$want" ]] && wronglayout+=("$ws is $got, want $want")
   done
 
   ((${#misplaced[@]})) && bad "placement: ${misplaced[*]}" || ok "placement: all $pinned workspaces on their home monitor"
-  ((${#wronglayout[@]})) && bad "layout: ${wronglayout[*]}" || ok "layout: every workspace matches the config"
   ((${#stillbound[@]})) && bad "keys: workspace ${stillbound[*]} switched off but still bound"
   ((${#unbound[@]})) && bad "keys: workspace ${unbound[*]} enabled but has no keybinding"
   ((${#stillbound[@]} + ${#unbound[@]})) || ok "keys: $pinned bound, $off unbound"
@@ -1127,11 +958,8 @@ omarchy-workspaces — pin Hyprland workspaces to specific monitors
   generate                         Write ~/.config/hypr/workspaces.lua
   apply                            Generate, reload Hyprland, re-home workspaces
   edit                             Open the config in your editor
-  layout <ws> <scrolling|dwindle|default>
-                                   Pin one workspace's layout, or clear it
-  toggle-layout                    Flip the active workspace (bound to SUPER+L)
   arrange <mon> <XxY> [...]        Move monitors on the desk (rewrites monitors.lua)
-  set-layout --base64 <b64>        Replace a whole profile (used by the overlay)
+  set-layout --base64 <b64>        Replace the layout (used by the overlay)
 
 Config: ~/.config/omarchy/workspaces.json
 Plugin: ~/.config/omarchy/plugins/io.github.kimm-stensborg.workspaces
@@ -1162,8 +990,6 @@ main() {
     apply)    cmd_apply ;;
     edit)     cmd_edit ;;
     open)     cmd_open ;;
-    layout)   shift; cmd_layout "$@" ;;
-    toggle-layout) cmd_toggle_layout ;;
     arrange|set-monitors) shift; cmd_arrange "$@" ;;
     set-layout) shift; cmd_set_layout "$@" ;;
     -h|--help|help) usage ;;

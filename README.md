@@ -245,8 +245,6 @@ omarchy-workspaces apply               # regenerate rules, reload, re-home
 omarchy-workspaces bootstrap           # what the service runs; safe any time
 omarchy-workspaces disable 4,10        # switch workspaces off entirely
 omarchy-workspaces enable 4            # and back on
-omarchy-workspaces layout 6 dwindle    # pin one workspace against the global layout
-omarchy-workspaces toggle-layout       # flip the active one (this is SUPER+L)
 omarchy-workspaces arrange DP-5 0x0 DP-7 2560x0   # move monitors on the desk
 omarchy-workspaces generate            # write the rules without reloading
 omarchy-workspaces edit                # open the config in $EDITOR
@@ -269,14 +267,12 @@ omarchy-workspaces doctor
 ```
 
 It asks Hyprland rather than assuming, and checks: the generated Lua is ours
-and current, the `require` is in place, `SUPER+L` is bound here and points at
-a script that exists, no saved `SUPER+L` override outranks us, every workspace
-is on its home monitor and in the layout the config asks for, and every
-switched-off workspace really is unbound.
+and current, the `require` is in place, every workspace is on its home monitor,
+and every switched-off workspace really is gone and unbound.
 
 It checks the layout on paper first, before comparing anything to a screen: a
-workspace placed on two monitors at once, or a `disabled` or `layouts` entry
-naming a workspace the layout never places. Those need nothing plugged in, so
+workspace placed on two monitors at once, or a `disabled` entry naming a
+workspace the layout never places. Those need nothing plugged in, so
 they run whatever is connected. It exits non-zero on
 any drift, so a hook or a keybinding can watch it too.
 
@@ -287,16 +283,12 @@ than printing "Applied" over the top of it.
 Config:   /home/you/.config/omarchy/workspaces.json
 
   ✓ workspaces.lua matches the config
-  ✓ SUPER+L points at a script that exists
   ✓ hyprland.lua requires hypr.workspaces
   ✓ the layout is self-consistent
-  ✗ saved SUPER+L layout override(s) outrank this plugin: workspace 2 7
-  ✓ SUPER+L is bound to this plugin's layout toggle
-  ✓ placement: all 10 workspaces on their home monitor
-  ✗ layout: 2 is scrolling, want dwindle
+  ✗ placement: 7 on DP-7, home is DP-5
   ✓ keys: 10 bound, 0 unbound
 
-2 problem(s). Run 'omarchy-workspaces apply' to reconcile.
+1 problem(s). Run 'omarchy-workspaces apply' to reconcile.
 ```
 
 Almost everything it finds is fixed by running `apply`.
@@ -334,7 +326,7 @@ Anything that needs a live Hyprland is `doctor`'s job instead.
     "desc:Lenovo Group Limited T27QD-40 VNACDZ1G": [5, 6, 7, 8],
     "desc:AU Optronics B160UAN04.9": [9, 10]
   },
-  "layouts": { "6": "scrolling" }
+  "disabled": []
 }
 ```
 
@@ -356,15 +348,6 @@ omarchy-workspaces detect --force --count=6
 `disabled` is optional and lists the workspaces that are switched off. They
 stay in `monitors` — off is a state, not a removal.
 
-`layouts` is optional and maps a workspace id to a layout name, pinning it
-against Hyprland's global `general.layout`. This is what `SUPER+L` writes.
-
-Every generated rule names a layout, including the tiling ones — `general.layout`
-normally, or `dwindle` when that is itself `scrolling`. Leaving the layout out of
-a rule does not restore the default: a reload with no layout leaves a workspace
-in whatever layout it last had, so toggling scrolling back off would not be
-undoable without a restart.
-
 ## Widget settings
 
 Set these inline on the widget's entry in `~/.config/omarchy/shell.json`:
@@ -380,46 +363,21 @@ is also what the editor's **Hide empty** toggle calls.
 Switched-off workspaces are never drawn, whatever `hideEmpty` says — a button
 for a workspace with no keybinding would offer something that does not work.
 
-## Scrolling, and SUPER+L
+## Tiling layout is not this plugin's job
 
-Layout is per workspace. `SUPER+L` toggles the one you are on between tiling
-and scrolling; anything you have not touched follows Hyprland's global
-`general.layout`. The editor does not show which workspaces carry one — layout is not what a
-picture of which-workspace-lives-where is about. `doctor` prints the live
-layout of each, and the config lists them.
+`SUPER+L` toggles the current workspace between tiling and scrolling. That is
+Omarchy's, it saves its choice under `~/.local/state/omarchy/workspace-layouts`,
+and this plugin does not touch it — the generated workspace rules deliberately
+name no layout, which is what lets the two coexist without arguing about whose
+answer survives a reload.
 
-```bash
-omarchy-workspaces layout 6 scrolling      # pin one workspace
-omarchy-workspaces layout 6 default        # back to the global layout
-omarchy-workspaces toggle-layout           # flip the active one; this is SUPER+L
-```
+Earlier versions did own this, first per monitor and then per workspace, and
+it was a mistake both times: two things writing one property, with load order
+picking the winner. A config carrying either form is handed back rather than
+dropped — the values are written where `SUPER+L` would have written them, so
+the screen keeps doing what it did — and the keys are removed.
 
-There used to be a per-monitor `⟷ Scroll` toggle as well. It is gone: two
-controls for one property is one too many, and the keybinding is the one that
-was always going to be reached for. A config still carrying the old
-`scrollable` key is folded down the first time this plugin reads it — every
-workspace on a monitor that was set to scroll gets that as its own override,
-so the picture does not change — and any override you had set by hand survives
-the fold.
-
-**`SUPER+L` writes those overrides.** Omarchy binds it to a layout toggle whose result *persists*: stock, it writes
-`~/.local/state/omarchy/workspace-layouts/<id>.lua`, which `default.hypr.toggles`
-loads from `hyprland.lua` **after** `hypr/workspaces.lua`. A file written weeks
-ago therefore landed on top of every rule generated here, on every reload, and
-won — permanently and silently. One monitor would end up half converted, the
-editor said one thing and the screen did another, and the scroll toggle looked
-broken because the workspace you were looking at was the one that would not
-change.
-
-Two answers to the same question, in two files, with load order deciding. So
-the generated Lua rebinds `SUPER+L` to this plugin's own
-`toggle-layout`, which writes the pin into `workspaces.json` instead. The key
-does exactly what it always did — flip the active workspace between tiling and
-scrolling, notification and all — but there is now one place that records it,
-and `apply` clears any stale files the stock toggle left behind.
-
-`doctor` checks that the rebind is in place, because losing it means the two
-systems are quietly writing separate answers again.
+This plugin places workspaces on monitors. That is all it does.
 
 ## How keys behave
 

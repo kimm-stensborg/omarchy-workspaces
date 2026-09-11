@@ -65,7 +65,7 @@ Item {
 
   // How many workspaces the config itself placed, counted before the gap-fill
   // below moves the leftovers onto the leftmost monitor. Without this, an
-  // entirely empty profile is indistinguishable from a full one by the time
+  // entirely empty layout is indistinguishable from a full one by the time
   // anything gets to look, because the fill has already placed all ten.
   property int placedByConfig: 0
   // The desk arrangement being edited, keyed by live output name. Seeded from
@@ -73,7 +73,6 @@ Item {
   // each monitor in ~/.config/hypr/monitors.lua.
   property var geometry: ({})
   property var initialGeometry: ({})
-  property string profileName: ""
   property bool hideEmpty: false
   property bool initialHideEmpty: false
   property bool dirty: false
@@ -133,7 +132,7 @@ Item {
   // elsewhere while the editor sits open — but never on top of unsaved changes.
   // The config is read asynchronously, so a freshly summoned editor runs
   // open() before it has arrived. Both paths land here, and the spread is
-  // decided only once there is a config to judge — otherwise "this profile
+  // decided only once there is a config to judge — otherwise "this layout
   // assigns nothing" and "the file has not been read yet" look identical.
   onConfigChanged: {
     if (root.opened && !root.dirty) {
@@ -152,7 +151,7 @@ Item {
   function parseConfig(content) {
     try {
       var parsed = JSON.parse(String(content || ""))
-      return parsed && parsed.version === 1 && Array.isArray(parsed.profiles) ? parsed : null
+      return parsed && parsed.version === 1 && parsed.monitors ? parsed : null
     } catch (error) {
       console.warn(root.pluginId, "ignoring unreadable config", root.configPath, error)
       return null
@@ -264,31 +263,23 @@ Item {
     return ""
   }
 
-  // Build the working copy: the first fully-connected profile, translated from
-  // stable selectors into the output names the stage draws.
+  // Build the working copy from the one layout on disk, translated from stable
+  // selectors into the output names the stage draws.
+  //
+  // A monitor in the layout that is not plugged in is skipped here: the editor
+  // draws the desk as it is, and the compositor reflows those workspaces onto
+  // a monitor that exists. They are not lost — `set-layout` leaves untouched
+  // monitors alone, so editing while undocked cannot drop them.
   function reloadFromDisk() {
-    var candidates = monitorList()
+    var candidates = root.monitorList()
     var next = ({})
     var taken = []
-    root.profileName = ""
 
-    var profiles = root.config ? root.config.profiles : []
-    var profileFound = null
-    for (var p = 0; p < profiles.length; p++) {
-      var entries = profiles[p].monitors || {}
-      var resolved = ({})
-      var complete = true
-      for (var selector in entries) {
-        var name = root.resolveSelector(selector, candidates)
-        if (!name) { complete = false; break }
-        resolved[name] = (entries[selector] || []).slice()
-      }
-      if (complete) {
-        next = resolved
-        root.profileName = String(profiles[p].name || "")
-        profileFound = profiles[p]
-        break
-      }
+    var mons = (root.config && root.config.monitors) || ({})
+    for (var selector in mons) {
+      var name = root.resolveSelector(selector, candidates)
+      if (!name) continue
+      next[name] = (mons[selector] || []).slice()
     }
 
     for (var m = 0; m < candidates.length; m++) {
@@ -299,9 +290,8 @@ Item {
 
     root.placedByConfig = taken.length
 
-    // Every workspace has to be somewhere for the picture to be complete. A
-    // config written before this rule existed can leave gaps, so anything
-    // unclaimed lands on the leftmost monitor rather than vanishing.
+    // Every workspace has to be somewhere for the picture to be complete, so
+    // anything unclaimed lands on the leftmost monitor rather than vanishing.
     if (candidates.length > 0) {
       var home = candidates[0].name
       for (var id = 1; id <= root.workspaceCount; id++) {
@@ -311,11 +301,13 @@ Item {
     }
 
     root.assignments = next
-    root.disabled = ((profileFound && profileFound.disabled) || []).slice()
-    root.hideEmpty = root.currentHideEmpty()
-    root.initialHideEmpty = root.hideEmpty
+    root.disabled = ((root.config && root.config.disabled) || []).slice()
+    // The stage draws monitors at their real positions, and both of these
+    // rebuild that picture. Dropping them stacks every card at the origin.
     root.seedGeometry()
     root.syncStageMonitors()
+    root.hideEmpty = root.currentHideEmpty()
+    root.initialHideEmpty = root.hideEmpty
     root.dirty = false
   }
 
@@ -384,7 +376,7 @@ Item {
   }
 
   // An even spread is what a fresh config already gets from `detect`, so the
-  // only time the editor needs to do it is when it opens on a profile that
+  // only time the editor needs to do it is when it opens on a layout that
   // assigns nothing at all — a hand-written config, or one whose monitors have
   // all been replaced. Then it is the difference between a usable starting
   // point and an empty picture, which is not a decision worth a button.
@@ -1227,21 +1219,6 @@ Item {
         Item {
           width: parent.width
           height: Style.spacing.controlHeight
-
-          // Which profile won is this plugin's business, not the reader's, so
-          // it is not shown. That no profile won at all is very much theirs:
-          // it is why the picture is empty and nothing they do here will stick.
-          Text {
-            visible: root.profileName === ""
-            anchors.left: parent.left
-            anchors.verticalCenter: parent.verticalCenter
-            text: "No saved layout matches the monitors that are plugged in"
-            color: root.foreground
-            opacity: 0.5
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            textFormat: Text.PlainText
-          }
 
           Row {
             anchors.right: parent.right

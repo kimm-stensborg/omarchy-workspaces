@@ -46,7 +46,7 @@ BarWidget {
   function parseConfig(content) {
     try {
       var parsed = JSON.parse(String(content || ""))
-      return parsed && parsed.version === 1 && Array.isArray(parsed.profiles) ? parsed : null
+      return parsed && parsed.version === 1 && parsed.monitors ? parsed : null
     } catch (error) {
       console.warn(moduleName, "ignoring unreadable config", configPath, error)
       return null
@@ -94,29 +94,23 @@ BarWidget {
     return ""
   }
 
-  // First profile whose every monitor is connected wins — the same rule the
-  // generated Lua uses, so the bar and the compositor never disagree.
+  // The one layout on disk, filtered to this screen. A switched-off workspace
+  // has no rule and no keybinding, so it cannot be reached at all; drawing a
+  // button for it would offer something that does not work, so they are
+  // filtered out rather than dimmed.
   //
-  // A switched-off workspace has no rule and no keybinding, so it cannot be
-  // reached at all; drawing a button for it would offer something that does
-  // not work. They are filtered out here rather than dimmed.
+  // A monitor in the layout that is unplugged is simply absent here, and the
+  // workspaces the compositor reflowed onto this screen show up through the
+  // live Hyprland state rather than through the config.
   function assignedIds() {
-    if (!config) return null
+    if (!config || !config.monitors) return null
     var monitors = monitorList()
-    for (var p = 0; p < config.profiles.length; p++) {
-      var assignments = config.profiles[p].monitors || {}
-      var off = config.profiles[p].disabled || []
-      var mine = null
-      var complete = true
-      for (var selector in assignments) {
-        var name = resolveSelector(selector, monitors)
-        if (!name) { complete = false; break }
-        if (name === root.screenName) mine = (assignments[selector] || []).slice()
-      }
-      if (complete) {
-        if (mine === null) return null
-        return mine.filter(function (id) { return off.indexOf(id) === -1 })
-      }
+    var off = config.disabled || []
+    for (var selector in config.monitors) {
+      if (resolveSelector(selector, monitors) !== root.screenName) continue
+      return (config.monitors[selector] || []).filter(function (id) {
+        return off.indexOf(id) === -1
+      })
     }
     return null
   }

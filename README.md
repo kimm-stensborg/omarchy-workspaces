@@ -116,7 +116,7 @@ picture matches the desk.
   `0` is workspace 10.
 - **Drag a monitor** to move it on the desk — see below.
 - Workspaces are spread evenly across your monitors when the config is first
-  built, and again if the editor ever opens on a profile that assigns nothing.
+  built, and again if the editor ever opens on a layout that assigns nothing.
   There is no button for it, because it is not a thing you should need twice.
 - **Identify** puts a big number and connector name on each physical screen for
   three seconds, so you can tell which `DP-` is which without counting cables.
@@ -217,9 +217,10 @@ key, and the settle pass then removes only the ones still switched off.
 - **Survives identical displays.** Monitors are matched by description, which
   includes the serial, so two of the same model keep their identity when
   `DP-5` and `DP-7` swap after a reboot or a dock reconnect.
-- **Survives undocking.** Profiles are tried in order and the first one whose
-  monitors are all connected wins, so unplugging everything falls through to a
-  laptop-only profile instead of stranding workspaces on a monitor that is gone.
+- **Survives undocking.** A monitor that is not plugged in has its workspaces
+  reflow onto the nearest one that is, and get them back when it returns.
+  Nothing is written to disk when that happens — the layout is still the
+  layout, so undocking and re-docking is not an edit.
 
 ## The CLI
 
@@ -238,7 +239,7 @@ refuses a plugin containing symlinks, and `omarchy plugin update` would fail.
 ```bash
 omarchy-workspaces doctor              # does the live state match the config?
 omarchy-workspaces status              # where each workspace lives right now
-omarchy-workspaces list                # every profile and its assignments
+omarchy-workspaces list                # the layout
 omarchy-workspaces assign DP-7 1-4     # assign; accepts 1-4, 1,2,5, or 0 for 10
 omarchy-workspaces apply               # regenerate rules, reload, re-home
 omarchy-workspaces bootstrap           # what the service runs; safe any time
@@ -273,30 +274,22 @@ a script that exists, no saved `SUPER+L` override outranks us, every workspace
 is on its home monitor and in the layout the config asks for, and every
 switched-off workspace really is unbound.
 
-It also checks **every** saved layout, not just the one in force. A fallback is
-only exercised the day a monitor goes missing, which is the worst moment to
-find out it was wrong all along, so the parts that are wrong on paper are
-reported now: a workspace placed on two monitors at once, a `disabled` or
-`layouts` entry naming a workspace that layout never places, and — the one
-that is genuinely hard to spot by reading — a layout that can never be used
-because an earlier one in the list needs a subset of its monitors, so it always
-matches first.
-
-Those checks need nothing plugged in, so they still run when *no* saved layout
-fits the monitors present. That is the moment they are most worth having. It exits non-zero on
+It checks the layout on paper first, before comparing anything to a screen: a
+workspace placed on two monitors at once, or a `disabled` or `layouts` entry
+naming a workspace the layout never places. Those need nothing plugged in, so
+they run whatever is connected. It exits non-zero on
 any drift, so a hook or a keybinding can watch it too.
 
 `apply` runs it before claiming success, and reports what does not match rather
 than printing "Applied" over the top of it.
 
 ```
-Profile:  all-monitors
 Config:   /home/you/.config/omarchy/workspaces.json
 
   ✓ workspaces.lua matches the config
   ✓ SUPER+L points at a script that exists
   ✓ hyprland.lua requires hypr.workspaces
-  ✓ all 4 saved layouts are consistent and reachable
+  ✓ the layout is self-consistent
   ✗ saved SUPER+L layout override(s) outrank this plugin: workspace 2 7
   ✓ SUPER+L is bound to this plugin's layout toggle
   ✓ placement: all 10 workspaces on their home monitor
@@ -336,25 +329,17 @@ Anything that needs a live Hyprland is `doctor`'s job instead.
   "version": 1,
   "count": 10,
   "persistent": true,
-  "profiles": [
-    {
-      "name": "all-monitors",
-      "monitors": {
-        "desc:Lenovo Group Limited T27QD-40 VNACDZ5V": [1, 2, 3, 4],
-        "desc:Lenovo Group Limited T27QD-40 VNACDZ1G": [5, 6, 7, 8],
-        "desc:AU Optronics B160UAN04.9": [9, 10]
-      },
-      "layouts": { "6": "scrolling" }
-    },
-    { "name": "only-eDP-1", "monitors": { "desc:AU Optronics B160UAN04.9": [1,2,3,4,5,6,7,8,9,10] } }
-  ]
+  "monitors": {
+    "desc:Lenovo Group Limited T27QD-40 VNACDZ5V": [1, 2, 3, 4],
+    "desc:Lenovo Group Limited T27QD-40 VNACDZ1G": [5, 6, 7, 8],
+    "desc:AU Optronics B160UAN04.9": [9, 10]
+  },
+  "layouts": { "6": "scrolling" }
 }
 ```
 
-Profiles are matched **in order**; the first one whose every monitor is
-connected is used, so the most specific goes first — put a single-monitor
-fallback ahead of the full desk and the full desk can never win. `doctor`
-checks for exactly that, and the editor lists what each fallback would do.
+There is one layout, and monitor order in it is left to right — which is what
+decides where workspaces go when a monitor is missing.
 
 A monitor key is either a bare output name (`eDP-1`) or `desc:` plus the
 monitor description from `hyprctl monitors`. Prefer `desc:` — output names move.
@@ -368,8 +353,8 @@ left to open a workspace on whichever monitor happens to be focused.
 omarchy-workspaces detect --force --count=6
 ```
 
-`disabled` is optional and lists the workspaces that are switched off in that
-profile. They stay in `monitors` — off is a state, not a removal.
+`disabled` is optional and lists the workspaces that are switched off. They
+stay in `monitors` — off is a state, not a removal.
 
 `layouts` is optional and maps a workspace id to a layout name, pinning it
 against Hyprland's global `general.layout`. This is what `SUPER+L` writes.
@@ -445,10 +430,21 @@ the same physical place.
 
 ## Hotplug
 
-The generated Lua subscribes to `monitor.added` and `monitor.removed`. When a
-monitor change makes a different profile win, it reloads the config; otherwise
-it just walks any drifted workspace back to its home monitor. The reload only
-fires on an actual profile change, so hotplug cannot loop.
+The generated Lua subscribes to `monitor.added` and `monitor.removed`, and
+re-derives where everything goes in place — no reload, because the layout on
+disk has not changed, only which monitors are answering.
+
+A monitor that is not connected has its workspaces reflow onto the nearest one
+that is: nearest by position in the layout, preferring the neighbour to the
+left. Unplug the laptop from the three-monitor desk above and 9 and 0 join
+DP-5; plug it back in and they return. Nothing is written to disk either way.
+
+This replaced a list of saved layouts matched first-fits against whatever was
+connected. It read as flexibility and behaved as a trap: unplugging one screen
+would match a single-monitor entry and collapse all ten workspaces onto it,
+leaving the other monitor connected and empty. A config still carrying
+`profiles` is folded into one layout — the fullest entry, since that is the one
+describing the whole desk — the first time the plugin reads it.
 
 ## Hacking on it
 

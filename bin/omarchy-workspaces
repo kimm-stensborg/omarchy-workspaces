@@ -36,6 +36,31 @@ ensure_config() {
   [[ -f $CONFIG ]] || die "no config at $CONFIG — run '$0 bootstrap' first"
   jq -e '.version == 1' "$CONFIG" >/dev/null 2>&1 || die "$CONFIG is not a version 1 config"
   migrate_scrollable
+  migrate_profiles
+}
+
+# There used to be a list of saved layouts, matched against whatever was
+# plugged in by taking the first whose monitors were all present. It read as
+# flexibility and behaved as a trap: unplug the laptop from a three-monitor
+# desk and a single-monitor entry would match first, collapsing all ten
+# workspaces onto one screen while the other sat there connected and empty.
+#
+# The behaviour people expect needs no list at all — a monitor that is not
+# there has its workspaces reflow onto the nearest one that is. So there is
+# one layout now. The fullest of the old entries is kept, since that is the
+# one describing the whole desk; the degenerate single-monitor ones described
+# the failure this replaces.
+migrate_profiles() {
+  jq -e 'has("profiles")' "$CONFIG" >/dev/null 2>&1 || return 0
+  jq '
+    (.profiles // []) as $old
+    | ($old | max_by(.monitors // {} | length) // {}) as $best
+    | del(.profiles)
+    | .monitors = ($best.monitors // {})
+    | (if (($best.disabled // []) | length) > 0 then .disabled = $best.disabled else . end)
+    | (if (($best.layouts // {}) | length) > 0 then .layouts = $best.layouts else . end)
+  ' "$CONFIG" | write_config
+  say "Collapsed the saved layout list into one layout; monitors that go missing now reflow."
 }
 
 # Layout used to be settable per monitor as well as per workspace. Two controls
@@ -46,7 +71,7 @@ ensure_config() {
 # same picture expressed the one remaining way. Runs once; the key is removed
 # after, so this is a no-op on every later call.
 migrate_scrollable() {
-  jq -e 'any(.profiles[]; has("scrollable"))' "$CONFIG" >/dev/null 2>&1 || return 0
+  jq -e 'any((.profiles // [])[]; has("scrollable"))' "$CONFIG" >/dev/null 2>&1 || return 0
   jq '
     .profiles |= map(
       if has("scrollable") then
@@ -83,25 +108,6 @@ resolve_selector() {
     end'
 }
 
-# First profile whose every monitor selector is currently connected.
-active_profile() {
-  local count name
-  count=$(jq '.profiles | length' "$CONFIG")
-  for ((i = 0; i < count; i++)); do
-    name=$(jq -r ".profiles[$i].name" "$CONFIG")
-    local ok=1 sel
-    while IFS= read -r sel; do
-      [[ -n $(resolve_selector "$sel") ]] || { ok=0; break; }
-    done < <(jq -r ".profiles[$i].monitors | keys_unsorted[]" "$CONFIG")
-    ((ok)) && { echo "$name"; return 0; }
-  done
-  return 1
-}
-
-profile_index() {
-  jq --arg n "$1" '[.profiles[].name] | index($n) // -1' "$CONFIG"
-}
-
 # ── commands ─────────────────────────────────────────────────────────────────
 
 cmd_detect() {
@@ -120,14 +126,7 @@ cmd_detect() {
         | { key: ($mons[$i] | selector),
             value: [ range(1; $c + 1) | select((. - 1) * $n / $c | floor == $i) ] } ]
       | from_entries as $docked
-    | { version: 1,
-        count: $c,
-        persistent: true,
-        profiles: (
-          [ { name: "all-monitors", monitors: $docked } ]
-          + ( $mons | map({ name: ("only-" + .name),
-                            monitors: { (selector): [ range(1; $c + 1) ] } }) )
-        ) }' | write_config
+    | { version: 1, count: $c, persistent: true, monitors: $docked }' | write_config
 
   say "Wrote $CONFIG from the ${1:-currently} connected monitors."
   cmd_list
@@ -135,50 +134,43 @@ cmd_detect() {
 
 cmd_list() {
   ensure_config
-  local active
-  active=$(active_profile || true)
   echo
-  jq -r --arg active "$active" --argjson keys "$KEY_SLOTS" '
-    .profiles[]
-    | (if .name == $active then "● " else "  " end) as $mark
-    | ((.disabled // []) | map({ key: (. | tostring), value: true }) | from_entries) as $off
-    | ($mark + .name + (if .name == $active then "  (active)" else "" end)),
-      ( .monitors | to_entries[]
-        | "      " + (.key | if startswith("desc:") then ltrimstr("desc:") else . end)
-          + "\n        " + ([.value[]
-              | (if . == $keys then "0" else tostring end) as $label
-              | if $off[. | tostring] then "(" + $label + ")" else $label end] | join(" ")) ),
-      ""' "$CONFIG"
-  echo "  Workspaces in (brackets) are switched off: no rule, no keybinding."
+  jq -r '
+    ((.disabled // []) | map({ key: (. | tostring), value: true }) | from_entries) as $off
+    | ((.layouts // {})) as $lay
+    | .monitors | to_entries[]
+    | "  " + (.key | if startswith("desc:") then ltrimstr("desc:") else . end)
+      + "\n      " + ([.value[]
+          | (if . == 10 then "0" else tostring end) as $label
+          | (if $off[. | tostring] then "(" + $label + ")" else $label end)
+            + (if $lay[. | tostring] then ":" + $lay[. | tostring] else "" end)] | join("  "))
+      + "\n"' "$CONFIG"
+  echo "  (n) is switched off. n:layout is pinned away from the global layout."
+  echo
 }
 
 cmd_status() {
   ensure_config
-  local active
-  active=$(active_profile || echo "(none — no profile matches the connected monitors)")
-  echo "Profile:  $active"
   echo "Config:   $CONFIG"
   echo "Lua:      $GENERATED"
   echo
   printf '%-6s %-10s %-10s %s\n' "WS" "HOME" "ACTUAL" ""
-  local idx; idx=$(profile_index "$active")
-  [[ $idx == -1 ]] && return 0
-  local ws home actual
+  local ws sel home actual
   for ws in $(managed_workspaces); do
-    local sel
-    sel=$(jq -r --argjson i "$idx" --argjson w "$ws" \
-      '.profiles[$i].monitors | to_entries[] | select(.value | index($w)) | .key' "$CONFIG")
-    [[ -z $sel ]] && { printf '%-6s %-10s %-10s %s\n' "$ws" "-" "-" "unassigned"; continue; }
-    if jq -e --argjson i "$idx" --argjson w "$ws" \
-        '((.profiles[$i].disabled // []) | index($w)) != null' "$CONFIG" >/dev/null; then
+    sel=$(selector_of "$ws")
+    [[ -z $sel ]] && continue
+    if jq -e --argjson w "$ws" '((.disabled // []) | index($w)) != null' "$CONFIG" >/dev/null; then
       printf '%-6s %-10s %-10s %s\n' "$ws" "$(resolve_selector "$sel")" "-" "off"
       continue
     fi
     home=$(resolve_selector "$sel")
-    actual=$(hyprctl workspaces -j | jq -r --argjson w "$ws" '.[] | select(.id == $w) | .monitor' || true)
+    actual=$(hyprctl workspaces -j | jq -r --argjson w "$ws" '.[] | select(.id == $w) | .monitor')
     [[ -z $actual ]] && actual="-"
+    # A workspace whose own monitor is unplugged has reflowed somewhere else.
+    # That is correct behaviour, not drift, so it is named rather than flagged.
     printf '%-6s %-10s %-10s %s\n' "$ws" "${home:-offline}" "$actual" \
-      "$([[ -n $home && $actual != "-" && $actual != "$home" ]] && echo '← misplaced')"
+      "$(if [[ -z $home ]]; then echo 'reflowed — its monitor is unplugged'
+         elif [[ $actual != "-" && $actual != "$home" ]]; then echo '← misplaced'; fi)"
   done
 }
 
@@ -211,32 +203,28 @@ selector_for() {
 
 cmd_assign() {
   ensure_config
-  local profile=""
-  [[ ${1:-} == --profile ]] && { profile=$2; shift 2; }
-  local monitor=${1:?usage: assign [--profile NAME] <monitor> <workspaces>}; shift
+  local monitor=${1:?usage: assign <monitor> <workspaces>}; shift
   local wanted; wanted=$(expand_range "$@")
-  [[ -z $profile ]] && profile=$(active_profile || die "no active profile; pass --profile")
-
   local selector; selector=$(selector_for "$monitor")
 
-  jq --arg p "$profile" --arg m "$selector" --argjson ws "$wanted" '
-    .profiles |= map(
-      if .name == $p then
-        .monitors |= (with_entries(.value -= $ws) | .[$m] = ((.[$m] // []) + $ws | unique)
-                      | with_entries(select(.value | length > 0)))
-      else . end)' "$CONFIG" | write_config
+  jq --arg m "$selector" --argjson ws "$wanted" '
+    .monitors |= (with_entries(.value -= $ws) | .[$m] = ((.[$m] // []) + $ws | unique)
+                  | with_entries(select(.value | length > 0)))' "$CONFIG" | write_config
 
-  say "Assigned $(tr '\n' ' ' <<<"$(jq -r '.[]' <<<"$wanted")")to $monitor in profile '$profile'."
+  say "Assigned $(tr '\n' ' ' <<<"$(jq -r '.[]' <<<"$wanted")")to $monitor."
 }
 
 # Workspaces this plugin speaks for in the active profile: everything the
 # profile assigns to a monitor, disabled ones included. Used to decide which of
 # Omarchy's saved layout overrides are ours to clear.
 managed_workspaces() {
-  local profile idx
-  profile=$(active_profile) || return 1
-  idx=$(profile_index "$profile")
-  jq -r --argjson i "$idx" '[.profiles[$i].monitors[][]] | unique | .[]' "$CONFIG"
+  jq -r '[.monitors[][]] | unique | .[]' "$CONFIG"
+}
+
+# The selector this layout puts a given workspace on, empty if none does.
+selector_of() {
+  jq -r --argjson w "$1" \
+    '.monitors | to_entries[] | select(.value | index($w)) | .key' "$CONFIG"
 }
 
 # Omarchy's SUPER+L toggle saves a per-workspace layout to
@@ -264,21 +252,15 @@ clear_layout_overrides() {
 cmd_workspace_state() {
   ensure_config
   local wanted_off=$1; shift
-  local profile=""
-  [[ ${1:-} == --profile ]] && { profile=$2; shift 2; }
   local wanted; wanted=$(expand_range "$@")
-  [[ -z $profile ]] && profile=$(active_profile || die "no active profile; pass --profile")
 
-  jq --arg p "$profile" --argjson ws "$wanted" --argjson off "$wanted_off" '
-    .profiles |= map(
-      if .name == $p then
-        .disabled = (
-          if $off then (((.disabled // []) + $ws) | unique)
-          else ((.disabled // []) - $ws) end)
-        | (if (.disabled | length) == 0 then del(.disabled) else . end)
-      else . end)' "$CONFIG" | write_config
+  jq --argjson ws "$wanted" --argjson off "$wanted_off" '
+    .disabled = (
+      if $off then (((.disabled // []) + $ws) | unique)
+      else ((.disabled // []) - $ws) end)
+    | (if (.disabled | length) == 0 then del(.disabled) else . end)' "$CONFIG" | write_config
 
-  say "$(if [[ $wanted_off == true ]]; then echo Disabled; else echo Enabled; fi)$(tr '\n' ' ' <<<"$(jq -r '" " + (.[]|tostring)' <<<"$wanted")") in profile '$profile'."
+  say "$(if [[ $wanted_off == true ]]; then echo Disabled; else echo Enabled; fi)$(tr '\n' ' ' <<<"$(jq -r '" " + (.[]|tostring)' <<<"$wanted")")."
 }
 
 GENERATED_MARKER="GENERATED BY omarchy-workspaces"
@@ -301,33 +283,36 @@ cmd_generate() {
 --
 -- Pins each workspace to a home monitor. Monitors are matched by description
 -- (serial included) so identical displays keep their identity across reboots
--- and dock reconnects. The first profile whose monitors are all connected
--- wins, so undocking falls through to a laptop-only profile.
+-- and dock reconnects. A monitor that is not plugged in has its workspaces
+-- reflow onto the nearest one that is, and get them back when it returns.
 
-local profiles = {
+local monitors = {
 LUA
     jq -r '
-      .profiles[] |
-      "  { name = " + (.name | @json) + ", disabled = { " +
-      ((.disabled // []) | map(tostring) | join(", ")) + " }, layouts = { " +
+      .monitors | to_entries | map(
+        "  { selector = " + (.key | @json) + ", workspaces = { " +
+        (.value | map(tostring) | join(", ")) + " } },") | join("\n")' "$CONFIG"
+    cat <<'LUA'
+}
+LUA
+    jq -r '
+      "local disabled_list = { " + (((.disabled // []) | map(tostring)) | join(", ")) + " }\n" +
+      "local overrides = { " +
       (((.layouts // {}) | to_entries | map("[" + .key + "] = " + (.value | @json))) | join(", ")) +
-      " }, monitors = {\n" +
-      ( .monitors | to_entries | map(
-          "    { selector = " + (.key | @json) + ", workspaces = { " +
-          (.value | map(tostring) | join(", ")) +
-          " } }," ) | join("\n") ) +
-      "\n  } },"' "$CONFIG"
+      " }"' "$CONFIG"
     local persistent self
     persistent=$(jq -r 'if .persistent == false then "false" else "true" end' "$CONFIG")
     self=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")
     cat <<LUA
-}
 
 local persistent = $persistent
 local key_slots = $KEY_SLOTS
 local toggle_cmd = "bash '$self' toggle-layout"
 LUA
     cat <<'LUA'
+
+local disabled = {}
+for _, ws in ipairs(disabled_list) do disabled[ws] = true end
 
 local function connected()
   local byName, descs = {}, {}
@@ -349,26 +334,51 @@ local function resolve(selector, byName, descs)
   return byName[selector]
 end
 
-local function pick()
+-- Where each workspace actually goes right now.
+--
+-- The layout says which monitor owns what. A monitor that is not plugged in
+-- owns nothing it can hold, so its workspaces reflow onto the nearest monitor
+-- that is — nearest by position in the layout, which is written left to right,
+-- preferring the neighbour to the left. Nothing is written to disk when this
+-- happens: the layout is still the layout, and plugging the monitor back in
+-- puts its workspaces home again.
+local function placement()
   local byName, descs = connected()
-  for _, profile in ipairs(profiles) do
-    local resolved, ok = {}, true
-    for _, group in ipairs(profile.monitors) do
-      local monitor = resolve(group.selector, byName, descs)
-      if not monitor then ok = false break end
-      resolved[#resolved + 1] =
-        { monitor = monitor, workspaces = group.workspaces }
+  local live, present = {}, {}
+  for i, group in ipairs(monitors) do
+    live[i] = resolve(group.selector, byName, descs)
+    if live[i] then present[#present + 1] = i end
+  end
+  if #present == 0 then return nil end
+
+  -- Distance doubled so the +1 only ever breaks a tie, never outranks a
+  -- genuinely closer monitor on the right.
+  local function nearest(from)
+    local best, bestDistance
+    for _, i in ipairs(present) do
+      local distance = math.abs(i - from) * 2 + (i > from and 1 or 0)
+      if not bestDistance or distance < bestDistance then best, bestDistance = i, distance end
     end
-    if ok then
-      local off = {}
-      for _, ws in ipairs(profile.disabled or {}) do off[ws] = true end
-      return profile.name, resolved, off, (profile.layouts or {})
+    return best
+  end
+
+  local out, index = {}, {}
+  for _, i in ipairs(present) do
+    index[live[i].name] = #out + 1
+    out[#out + 1] = { monitor = live[i], workspaces = {} }
+  end
+  for i, group in ipairs(monitors) do
+    local target = live[i] and i or nearest(i)
+    local slot = out[index[live[target].name]]
+    for _, ws in ipairs(group.workspaces) do
+      if not disabled[ws] then slot.workspaces[#slot.workspaces + 1] = ws end
     end
   end
-  return nil, nil, {}, {}
+  for _, slot in ipairs(out) do table.sort(slot.workspaces) end
+  return out
 end
 
-local active, groups, disabled, overrides = pick()
+local groups = placement()
 
 -- What a workspace gets with no override of its own: whatever you have set
 -- globally, except when that is itself `scrolling` — a workspace toggled off
@@ -419,7 +429,7 @@ apply_rules()
 -- Rules only bind a workspace at creation time, so anything that already
 -- exists (or drifted after a hotplug) is walked home once the config settles.
 local function rehome()
-  local _, current = pick()
+  local current = placement()
   if not current then return end
   for _, group in ipairs(current) do
     for _, ws in ipairs(group.workspaces) do
@@ -438,7 +448,7 @@ end
 -- focused, which is the placement this plugin exists to prevent. Only the
 -- unbind is needed — a reload re-runs Omarchy's bindings and restores every
 -- key, so this pass just takes the disabled ones back out again afterwards.
--- Which workspaces the winning profile actually speaks for. A key slot that
+-- Which workspaces the layout actually speaks for. A key slot that
 -- is not in here belongs to nobody: either it is switched off, or the config
 -- has fewer workspaces than Omarchy has keys. Both want the same treatment,
 -- because a bound key with no rule behind it opens a workspace on whatever
@@ -489,24 +499,18 @@ end
 
 hl.timer(settle, { timeout = 500, type = "oneshot" })
 
--- Track the winning profile across reloads so the hotplug handler can tell a
--- real profile change from a monitor that came back as-is.
+-- A monitor coming or going changes where everything reflows to, so the rules
+-- are rebuilt in place. No reload: the layout on disk has not changed, only
+-- which monitors are answering, and re-deriving is both faster and free of the
+-- loop risk a reload carries. The hooked flag keeps `hyprctl reload` from
+-- stacking a second copy of these subscriptions.
 _G.__omarchy_workspaces = _G.__omarchy_workspaces or {}
 local state = _G.__omarchy_workspaces
-state.active = active
 
--- A monitor coming or going can change which profile applies. Reload only when
--- the winning profile actually changed, so hotplug never loops. The hooked flag
--- keeps `hyprctl reload` from stacking a second copy of these subscriptions.
 local function on_monitor_change()
   hl.timer(function()
-    local next_active = pick()
-    if next_active ~= state.active then
-      state.active = next_active
-      hl.exec_cmd("hyprctl reload")
-    else
-      settle()
-    end
+    groups = placement()
+    settle()
   end, { timeout = 400, type = "oneshot" })
 end
 
@@ -538,20 +542,21 @@ LUA
 # rules only bind at creation time, so anything already open when the rules
 # change has to be moved by hand.
 rehome_workspaces() {
-  local active idx
-  active=$(active_profile) || return 1
-  idx=$(profile_index "$active")
   local ws sel home actual
   for ws in $(managed_workspaces); do
-    sel=$(jq -r --argjson i "$idx" --argjson w "$ws" \
-      '.profiles[$i].monitors | to_entries[] | select(.value | index($w)) | .key' "$CONFIG")
+    sel=$(selector_of "$ws")
     [[ -z $sel ]] && continue
-    home=$(resolve_selector "$sel"); [[ -z $home ]] && continue
+    home=$(resolve_selector "$sel")
+    # Unplugged: the generated Lua has already reflowed it somewhere sensible,
+    # and second-guessing that from here would only fight it.
+    [[ -z $home ]] && continue
     actual=$(hyprctl workspaces -j | jq -r --argjson w "$ws" '.[] | select(.id == $w) | .monitor')
     [[ -n $actual && $actual != "$home" ]] &&
       hyprctl dispatch "hl.dsp.workspace.move({ workspace = \"$ws\", monitor = \"$home\" })" >/dev/null
   done
-  echo "$active"
+  # The loop's last statement is a test that is false whenever nothing needed
+  # moving, which under `set -e` would take the caller down with it.
+  return 0
 }
 
 reload_hyprland() {
@@ -571,8 +576,7 @@ cmd_apply() {
   reload_hyprland
   # Nudge already-open workspaces onto their home monitor right away rather
   # than waiting for the lua timer.
-  local active
-  active=$(rehome_workspaces) || die "no profile matches the connected monitors"
+  rehome_workspaces
   # Deliberately no `rescanPlugins` here. That reloads plugin *code*, and doing
   # it during a config change races the bar's in-place settings patch: the patch
   # lands on the bar's layout copy but not on the widget being torn down, and
@@ -585,9 +589,9 @@ cmd_apply() {
   sleep 1
   local report
   if report=$(QUIET=1 cmd_doctor 2>&1); then
-    say "Applied profile '$active'."
+    say "Applied."
   else
-    echo "omarchy-workspaces: applied profile '$active', but the result does not match:" >&2
+    echo "omarchy-workspaces: applied, but the result does not match:" >&2
     grep '✗' <<<"$report" >&2
     echo "  (run 'omarchy-workspaces doctor' for the full picture)" >&2
     return 1
@@ -630,7 +634,7 @@ cmd_bootstrap() {
 
   if ((changed)); then
     reload_hyprland
-    rehome_workspaces >/dev/null || true
+    rehome_workspaces
     say "Bootstrapped: workspace rules are in sync."
   else
     say "Already in sync."
@@ -648,36 +652,28 @@ default_layout() {
 }
 
 effective_layout() {
-  local ws=$1 profile=$2 own idx
-  idx=$(profile_index "$profile")
-  own=$(jq -r --argjson i "$idx" --arg w "$ws" '.profiles[$i].layouts[$w] // ""' "$CONFIG")
-  [[ -n $own ]] && { echo "$own"; return; }
-  default_layout
+  local own
+  own=$(jq -r --arg w "$1" '.layouts[$w] // ""' "$CONFIG")
+  [[ -n $own ]] && echo "$own" || default_layout
 }
 
 # Pin one workspace to a layout, or hand it back to the global one.
 cmd_layout() {
   ensure_config
-  local profile=""
-  [[ ${1:-} == --profile ]] && { profile=$2; shift 2; }
-  local ws=${1:?usage: layout [--profile NAME] <workspace> <scrolling|dwindle|default>}
-  local want=${2:?usage: layout [--profile NAME] <workspace> <scrolling|dwindle|default>}
+  local ws=${1:?usage: layout <workspace> <scrolling|dwindle|default>}
+  local want=${2:?usage: layout <workspace> <scrolling|dwindle|default>}
   [[ $ws =~ ^[0-9]+$ ]] || die "not a workspace number: '$ws'"
   ((ws == 0)) && ws=$KEY_SLOTS
-  [[ -z $profile ]] && profile=$(active_profile || die "no active profile; pass --profile")
 
   case $want in
     default|auto|clear)
-      jq --arg p "$profile" --arg w "$ws" '
-        .profiles |= map(if .name == $p then
-          (.layouts // {}) as $l | .layouts = ($l | del(.[$w]))
-          | (if (.layouts | length) == 0 then del(.layouts) else . end)
-        else . end)' "$CONFIG" | write_config
-      say "Workspace $ws follows its monitor again." ;;
+      jq --arg w "$ws" '
+        .layouts = ((.layouts // {}) | del(.[$w]))
+        | (if (.layouts | length) == 0 then del(.layouts) else . end)' "$CONFIG" | write_config
+      say "Workspace $ws follows the global layout again." ;;
     scrolling|dwindle|master)
-      jq --arg p "$profile" --arg w "$ws" --arg v "$want" '
-        .profiles |= map(if .name == $p then .layouts = ((.layouts // {}) + { ($w): $v }) else . end)' \
-        "$CONFIG" | write_config
+      jq --arg w "$ws" --arg v "$want" '
+        .layouts = ((.layouts // {}) + { ($w): $v })' "$CONFIG" | write_config
       say "Workspace $ws pinned to $want." ;;
     *) die "layout takes scrolling, dwindle, or default" ;;
   esac
@@ -693,20 +689,19 @@ cmd_layout() {
 # to reconcile and does not bounce the compositor a second later.
 cmd_toggle_layout() {
   ensure_config
-  local ws profile current next
+  local ws current next
   ws=$(hyprctl activeworkspace -j | jq -r '.id')
   [[ $ws =~ ^[0-9]+$ ]] || die "no active workspace"
-  profile=$(active_profile) || die "no profile matches the connected monitors"
 
-  current=$(effective_layout "$ws" "$profile")
+  current=$(effective_layout "$ws")
   [[ $current == scrolling ]] && next=dwindle || next=scrolling
 
-  # An override equal to the monitor's own setting is noise in the config, so
-  # a toggle back to the default clears the entry rather than restating it.
+  # An override equal to the global layout is noise in the config, so a toggle
+  # back to the default clears the entry rather than restating it.
   if [[ $next == "$(default_layout)" ]]; then
-    QUIET=1 cmd_layout --profile "$profile" "$ws" default
+    QUIET=1 cmd_layout "$ws" default
   else
-    QUIET=1 cmd_layout --profile "$profile" "$ws" "$next"
+    QUIET=1 cmd_layout "$ws" "$next"
   fi
 
   QUIET=1 cmd_generate
@@ -746,9 +741,6 @@ bad()   { echo "  ✗ $*" >&2; DOCTOR_PROBLEMS=$((DOCTOR_PROBLEMS + 1)); }
 cmd_doctor() {
   ensure_config
   DOCTOR_PROBLEMS=0
-  local profile idx
-  profile=$(active_profile || true)
-  say "Profile:  ${profile:-(none — no saved layout fits the monitors that are plugged in)}"
   say "Config:   $CONFIG"
   say ""
 
@@ -788,80 +780,44 @@ cmd_doctor() {
     && ok "hyprland.lua requires hypr.workspaces" \
     || bad "hyprland.lua does not require hypr.workspaces — no rule is being applied"
 
-  # ── every profile, not just the one in force ─────────────────────────────
-  #
-  # A fallback profile is only exercised on the day a monitor goes missing,
-  # which is the worst moment to discover it was wrong all along. None of it
-  # can be checked against the compositor — those monitors are not plugged in —
-  # but the parts that are wrong on paper are wrong whatever is connected.
+  # ── the layout itself, before anything is compared to a screen ───────────
   local faults
   faults=$(jq -r '
-    [ .profiles
-      | to_entries[]
-      | .key as $i | .value as $p
-      | ($p.name // ("#" + ($i | tostring))) as $name
-      | ($p.monitors // {}) as $mons
-      | ([$mons[][]] ) as $all
-      | (
-          # A workspace on two monitors at once has no home, which is the one
-          # thing this plugin promises.
-          ( $all | group_by(.) | map(select(length > 1) | .[0]) | sort
+    ([.monitors[][]]) as $all
+    | (
+        # A workspace on two monitors at once has no home, which is the one
+        # thing this plugin promises.
+        ( $all | group_by(.) | map(select(length > 1) | .[0]) | sort
+          | if length > 0 then
+              [ "workspace " + (map(tostring) | join(", ")) + " is on two monitors" ]
+            else [] end )
+        # Switching off, or pinning the layout of, a workspace the layout never
+        # places is a line that will never do anything.
+        + ( ((.disabled // []) - ($all | unique)) | sort
             | if length > 0 then
-                [ $name + ": workspace " + (map(tostring) | join(", ")) + " is on two monitors" ]
+                [ "disabled workspace " + (map(tostring) | join(", ")) + " is not in the layout" ]
               else [] end )
-          # Switching off, or pinning the layout of, a workspace the profile
-          # never places is a line that will never do anything.
-          + ( (($p.disabled // []) - ($all | unique)) | sort
-              | if length > 0 then
-                  [ $name + ": disabled workspace " + (map(tostring) | join(", ")) + " is not assigned here" ]
-                else [] end )
-          + ( (($p.layouts // {} | keys | map(tonumber)) - ($all | unique)) | sort
-              | if length > 0 then
-                  [ $name + ": layout set for unassigned workspace " + (map(tostring) | join(", ")) ]
-                else [] end )
-          + ( if ($mons | length) == 0 then [ $name + ": places no workspaces at all" ] else [] end )
-        )
-    ] | flatten | .[]' "$CONFIG")
-
-  # Profiles are tried in order and the first whose monitors are all present
-  # wins, so a profile listed after one needing only a subset of its monitors
-  # can never be reached: whenever this one could match, the earlier one
-  # already has. Pairwise, which reads far better here than as more jq.
-  local shadow=() count i j
-  count=$(jq '.profiles | length' "$CONFIG")
-  for ((i = 0; i < count; i++)); do
-    for ((j = 0; j < i; j++)); do
-      if jq -e --argjson a "$j" --argjson b "$i" '
-          (.profiles[$a].monitors // {} | keys) as $earlier
-          | (.profiles[$b].monitors // {} | keys) as $later
-          | ($earlier | length) > 0 and (($earlier - $later) | length) == 0' "$CONFIG" >/dev/null; then
-        shadow+=("$(jq -r --argjson a "$j" --argjson b "$i" \
-          '"\(.profiles[$b].name) can never be used: \(.profiles[$a].name) comes first and needs fewer monitors"' "$CONFIG")")
-        break
-      fi
-    done
-  done
+        + ( (((.layouts // {}) | keys | map(tonumber)) - ($all | unique)) | sort
+            | if length > 0 then
+                [ "layout pinned for workspace " + (map(tostring) | join(", ")) + ", which is not in the layout" ]
+              else [] end )
+        + ( if ((.monitors // {}) | length) == 0 then [ "the layout places no workspaces at all" ] else [] end )
+      ) | .[]' "$CONFIG")
 
   if [[ -n $faults ]]; then
     while IFS= read -r line; do [[ -n $line ]] && bad "$line"; done <<<"$faults"
+  else
+    ok "the layout is self-consistent"
   fi
-  if ((${#shadow[@]})); then
-    for line in "${shadow[@]}"; do bad "$line"; done
-  fi
-  [[ -z $faults ]] && ((${#shadow[@]} == 0)) &&
-    ok "all $count saved layouts are consistent and reachable"
 
   # Everything above holds whatever is plugged in. Everything below compares
-  # against a running compositor, which needs a layout that fits the monitors
-  # actually present. Not having one is itself the finding — and it is exactly
-  # when the checks above matter most, which is why they already ran.
-  if [[ -z $profile ]]; then
-    bad "no saved layout fits the connected monitors: $(monitors_json | jq -r '[.[].name] | join(", ")')"
+  # against a running compositor, which needs at least one monitor answering.
+  if [[ $(monitors_json | jq 'length') == 0 ]]; then
+    bad "no monitors are connected"
     say ""
-    echo "$DOCTOR_PROBLEMS problem(s). Run 'omarchy-workspaces apply' to reconcile." >&2
+    echo "$DOCTOR_PROBLEMS problem(s)." >&2
     return 1
   fi
-  idx=$(profile_index "$profile")
 
   # ── Omarchy's SUPER+L overrides outrank us, so any survivor is a problem ──
   local stale=() ws
@@ -891,13 +847,11 @@ cmd_doctor() {
 
   local misplaced=() wronglayout=() stillbound=() unbound=() pinned=0 off=0
   for ws in $(managed_workspaces); do
-    local sel; sel=$(jq -r --argjson i "$idx" --argjson w "$ws" \
-      '.profiles[$i].monitors | to_entries[] | select(.value | index($w)) | .key' "$CONFIG")
+    local sel; sel=$(selector_of "$ws")
     [[ -z $sel ]] && continue
 
     local is_off="false"
-    jq -e --argjson i "$idx" --argjson w "$ws" \
-      '((.profiles[$i].disabled // []) | index($w)) != null' "$CONFIG" >/dev/null && is_off="true"
+    jq -e --argjson w "$ws" '((.disabled // []) | index($w)) != null' "$CONFIG" >/dev/null && is_off="true"
 
     local bound="false"
     [[ " $live_binds " == *" $ws "* ]] && bound="true"
@@ -913,12 +867,14 @@ cmd_doctor() {
     [[ $bound == false ]] && unbound+=("$ws")
 
     local home actual
-    home=$(resolve_selector "$sel"); [[ -z $home ]] && continue
+    home=$(resolve_selector "$sel")
+    # Its monitor is unplugged, so it has reflowed elsewhere. Intended.
+    [[ -z $home ]] && continue
     actual=$(sed -n "s/.*\b$ws=\([^ ]*\).*/\1/p" <<<"$live_place")
     [[ -n $actual && $actual != "$home" ]] && misplaced+=("$ws on $actual, home is $home")
 
     local want own
-    own=$(jq -r --argjson i "$idx" --arg w "$ws" '.profiles[$i].layouts[$w] // ""' "$CONFIG")
+    own=$(jq -r --arg w "$ws" '.layouts[$w] // ""' "$CONFIG")
     [[ -n $own ]] && want="$own" || want="$tiling"
     local got; got=$(sed -n "s/.*\b$ws=\([^ ]*\).*/\1/p" <<<"$live_layout")
     [[ -n $got && $got != "gone" && $got != "$want" ]] && wronglayout+=("$ws is $got, want $want")
@@ -954,10 +910,9 @@ cmd_edit() {
 # survive those names changing.
 cmd_set_layout() {
   ensure_config
-  local profile="" payload="" offs=""
+  local payload="" offs=""
   while (($#)); do
     case $1 in
-      --profile) profile=${2:?--profile needs a name}; shift 2 ;;
       --base64)  payload=$(base64 -d <<<"${2:?--base64 needs a value}"); shift 2 ;;
       --disabled-base64)
                  offs=$(base64 -d <<<"${2:?--disabled-base64 needs a value}"); shift 2 ;;
@@ -966,10 +921,9 @@ cmd_set_layout() {
   done
   [[ -n $payload ]] || die "set-layout needs a JSON object of monitor -> workspaces"
   jq -e 'type == "object"' <<<"$payload" >/dev/null 2>&1 || die "set-layout payload is not a JSON object"
-  [[ -z $profile ]] && profile=$(active_profile || die "no profile matches the connected monitors")
 
-  local monitors; monitors=$(monitors_json)
-  local mapped
+  local monitors mapped
+  monitors=$(monitors_json)
   mapped=$(jq -n --argjson layout "$payload" --argjson mons "$monitors" '
     ( $mons
       | map(select((.description // "") != "") | { key: .name, value: ("desc:" + .description) })
@@ -980,39 +934,27 @@ cmd_set_layout() {
         | .value |= (map(tonumber) | unique))
     | with_entries(select(.value | length > 0))')
 
-  jq --arg p "$profile" --argjson m "$mapped" '
-    .profiles |= map(if .name == $p then .monitors = $m else . end)' "$CONFIG" | write_config
+  # Only the monitors the editor can see are replaced. One that is unplugged
+  # is not absent from the desk, only from this screen, and dropping its
+  # workspaces because they were not in a payload that could never have
+  # mentioned them would lose the layout every time you edited while undocked.
+  jq --argjson m "$mapped" '
+    ($m | keys) as $touched
+    | .monitors = (
+        (.monitors | with_entries(select(.key as $k | ($touched | index($k)) == null)))
+        + $m)
+    | .monitors |= with_entries(.value |= (map(select(. != null)) | unique))' "$CONFIG" | write_config
 
-  # Only when actually passed. A script that
-  # rearranges workspaces has no opinion about which are switched off.
   if [[ -n $offs ]]; then
     jq -e 'type == "array"' <<<"$offs" >/dev/null 2>&1 ||
       die "--disabled-base64 payload is not a JSON array"
-    jq --arg p "$profile" --argjson d "$offs" '
-      .profiles |= map(
-        if .name == $p then
-          (if ($d | length) == 0 then del(.disabled) else .disabled = ($d | map(tonumber) | unique) end)
-        else . end)' "$CONFIG" | write_config
+    jq --argjson d "$offs" '
+      if ($d | length) == 0 then del(.disabled) else .disabled = ($d | map(tonumber) | unique) end' \
+      "$CONFIG" | write_config
   fi
 
-  say "Replaced the layout of profile '$profile'."
+  say "Replaced the layout."
 }
-
-
-
-# ── monitor arrangement ──────────────────────────────────────────────────────
-#
-# Where each monitor sits on the desk lives in ~/.config/hypr/monitors.lua, and
-# that file is yours: the modes, the scales and the comments around them are
-# none of this plugin's business. So this does not regenerate it. It rewrites
-# the one `position = "XxY"` string inside each `hl.monitor` block it can match
-# to a connected monitor, and appends a block only for a monitor that has none.
-#
-# Matching accepts either form the file may use — a bare output name, or a
-# `desc:` selector (whole or prefix). The catch-all block for newly connected
-# displays has an empty output and is never touched.
-
-MONITORS_MARKER="Added by omarchy-workspaces"
 
 arrange_awk() {
   cat <<'AWK'
@@ -1176,10 +1118,10 @@ omarchy-workspaces — pin Hyprland workspaces to specific monitors
   open                             Open the visual editor overlay
   bootstrap                        Seed config + rules if missing, sync if not
   detect [--force] [--count=N]     Build a config from the connected monitors
-  list                             Show every profile and its assignments
+  list                             Show the layout
   status                           Show where each workspace lives right now
   doctor                           Check the live state against the config
-  assign [--profile N] <mon> <ws>  Assign workspaces (1-4, 1,2,5) to a monitor
+  assign <mon> <ws>                Assign workspaces (1-4, 1,2,5) to a monitor
   disable <ws>                     Switch workspaces off: no rule, no keybinding
   enable <ws>                      Switch them back on
   generate                         Write ~/.config/hypr/workspaces.lua

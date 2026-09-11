@@ -7,14 +7,9 @@ Out of the box, Omarchy lets workspaces land wherever they were first opened,
 and the bar renders the same list of numbers on every screen. On a multi-monitor
 desk that means workspace 7 might be on the left today and the middle tomorrow,
 and all three bars show ten identical buttons. This plugin fixes both halves
-from one config file — and because its editor already draws your monitors to
-scale, it lets you drag them into a new order too.
+from one config file.
 
-```
-┌─ DP-7 (left) ─┐ ┌─ DP-5 (middle) ┐ ┌ eDP-1 ┐
-│ 1 2 3 4       │ │ 5 6 7 8        │ │ 9 0   │
-└───────────────┘ └────────────────┘ └───────┘
-```
+![Each monitor's bar showing only its own workspaces, above the editor that assigns them](preview.png)
 
 - **Plugin ID:** `io.github.kimm-stensborg.workspaces`
 - **Kinds:** `bar-widget`, `overlay`, `service`
@@ -92,26 +87,12 @@ available, so `omarchy plugin enable omarchy.workspaces` puts it back.
 visual editor. Monitors are drawn to scale in their real arrangement, so the
 picture matches the desk.
 
-```
-┌───────────────────────────────────────────────────────────────┐
-│  Workspaces                                                    │
-│  Drag a workspace to another monitor.                           │
-│  Click a workspace to switch it off.                            │
-│                                                                │
-│  ┌── DP-7 ────────[1]┐┌── DP-5 ────────[2]┐┌ eDP-1 ───[3]┐   │
-│  │ 2560 x 1440        ││ 2560 x 1440        ││ 1920 x 1200 │   │
-│  │ 1  2  3 (4)        ││ 5  6  7  8         ││ 9  0        │   │
-│  └────────────────────┘└────────────────────┘└─────────────┘   │
-│                                                                │
-│                                     [Identify][Cancel][Apply]  │
-└────────────────────────────────────────────────────────────────┘
-```
-
-`(4)` is switched off: an outline with a line through it, and no keybinding.
+It is the lower half of the screenshot above.
 
 - **Drag** a workspace chip from one monitor to another.
 - **Click** a chip to switch that workspace off — or press its number key.
-  `0` is workspace 10.
+  `0` is workspace 10. A switched-off workspace stays in place as an outline
+  with a line through it, and has no keybinding at all.
 - Workspaces are spread evenly across your monitors when the config is first
   built, and again if the editor ever opens on a layout that assigns nothing.
   There is no button for it, because it is not a thing you should need twice.

@@ -73,10 +73,6 @@ Item {
   // their monitor's setting. Read-only here: the editor shows them so the
   // picture is not lying, but the key is what sets them.
   property var layouts: ({})
-  // Live output name -> bool. Which monitors run Hyprland's scrolling layout
-  // instead of tiling; a per-monitor choice, because a wide desk display and a
-  // laptop panel rarely want the same one.
-  property var scrollable: ({})
   // The desk arrangement being edited, keyed by live output name. Seeded from
   // Hyprland, moved by dragging a monitor, written back as the `position` of
   // each monitor in ~/.config/hypr/monitors.lua.
@@ -278,7 +274,6 @@ Item {
   function reloadFromDisk() {
     var candidates = monitorList()
     var next = ({})
-    var nextScroll = ({})
     var taken = []
     root.profileName = ""
 
@@ -295,11 +290,6 @@ Item {
       }
       if (complete) {
         next = resolved
-        var scrolls = profiles[p].scrollable || []
-        for (var s = 0; s < scrolls.length; s++) {
-          var scrollName = root.resolveSelector(String(scrolls[s]), candidates)
-          if (scrollName) nextScroll[scrollName] = true
-        }
         root.profileName = String(profiles[p].name || "")
         profileFound = profiles[p]
         break
@@ -310,7 +300,6 @@ Item {
       if (!next[candidates[m].name]) next[candidates[m].name] = []
       next[candidates[m].name].sort(function (a, b) { return a - b })
       taken = taken.concat(next[candidates[m].name])
-      nextScroll[candidates[m].name] = nextScroll[candidates[m].name] === true
     }
 
     root.placedByConfig = taken.length
@@ -329,7 +318,6 @@ Item {
     root.assignments = next
     root.disabled = ((profileFound && profileFound.disabled) || []).slice()
     root.layouts = (profileFound && profileFound.layouts) || ({})
-    root.scrollable = nextScroll
     root.hideEmpty = root.currentHideEmpty()
     root.initialHideEmpty = root.hideEmpty
     root.seedGeometry()
@@ -384,21 +372,6 @@ Item {
     for (var key in next) next[key].sort(function (a, b) { return a - b })
 
     root.assignments = next
-    root.dirty = true
-  }
-
-  function cloneScrollable(source) {
-    var out = ({})
-    for (var name in source) out[name] = source[name] === true
-    return out
-  }
-
-  // The scrolling layout is a property of the monitor, not of the workspaces on
-  // it, so this flips the whole screen at once.
-  function toggleScrollable(name) {
-    var next = root.cloneScrollable(root.scrollable)
-    next[name] = !next[name]
-    root.scrollable = next
     root.dirty = true
   }
 
@@ -459,9 +432,6 @@ Item {
     // Everything goes through the CLI, so the overlay, the TUI and a terminal
     // all write config the same single way. base64 keeps a monitor name from
     // ever being read as shell syntax.
-    var scrolling = []
-    for (var screen in root.scrollable) if (root.scrollable[screen]) scrolling.push(screen)
-
     var run = "bash " + Util.shellQuote(root.cli) + " "
     var command = ""
 
@@ -479,7 +449,6 @@ Item {
 
     command += run + "set-layout --base64 "
       + Qt.btoa(JSON.stringify(payload))
-      + " --scrollable-base64 " + Qt.btoa(JSON.stringify(scrolling))
       + " --disabled-base64 " + Qt.btoa(JSON.stringify(root.disabled)) + " --quiet"
     // `hideEmpty` lives on this widget's entry in shell.json, which belongs to
     // the shell, not to this plugin. `omarchy bar set` is the supported way in;
@@ -1233,53 +1202,14 @@ Item {
                 anchors.margins: Style.spacing.md
                 spacing: Style.spacing.sm
 
-                // Name on the left, the monitor's layout toggle on the right.
-                Item {
+                Text {
                   width: parent.width
-                  height: Math.max(cardName.implicitHeight, scrollToggle.height)
-
-                  Text {
-                    id: cardName
-                    anchors.left: parent.left
-                    anchors.right: scrollToggle.left
-                    anchors.rightMargin: Style.spacing.sm
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: screenCard.modelData.name
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                    textFormat: Text.PlainText
-                    elide: Text.ElideRight
-                  }
-
-                  Rectangle {
-                    id: scrollToggle
-                    readonly property bool active: root.scrollable[screenCard.monitorName] === true
-
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: scrollLabel.implicitWidth + Style.spacing.sm * 2
-                    height: scrollLabel.implicitHeight + Style.spacing.xxs * 2
-                    radius: Style.cornerRadius
-                    color: active ? Style.selectedFill
-                      : (scrollHover.hovered ? Style.hoverFill : "transparent")
-                    border.width: 1
-                    border.color: active ? root.accent : root.hairline
-
-                    Text {
-                      id: scrollLabel
-                      anchors.centerIn: parent
-                      text: "\u27f7 Scroll"
-                      color: scrollToggle.active ? root.accent : root.foreground
-                      opacity: scrollToggle.active ? 1 : 0.45
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                      textFormat: Text.PlainText
-                    }
-
-                    HoverHandler { id: scrollHover; cursorShape: Qt.PointingHandCursor }
-                    TapHandler { onTapped: root.toggleScrollable(screenCard.monitorName) }
-                  }
+                  text: screenCard.modelData.name
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  textFormat: Text.PlainText
+                  elide: Text.ElideRight
                 }
                 Text {
                   width: parent.width

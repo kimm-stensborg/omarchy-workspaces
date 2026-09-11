@@ -100,9 +100,9 @@ picture matches the desk.
 │  Drag a workspace to another monitor, or a monitor to           │
 │  rearrange the desk. Click a workspace to switch it off.        │
 │                                                                │
-│  ┌── DP-7 ──[⟷ Scroll]┐┌── DP-5 ──[⟷ Scroll]┐┌ eDP-1 ─────┐   │
+│  ┌── DP-7 ───────────┐┌── DP-5 ───────────┐┌ eDP-1 ──────┐   │
 │  │ 2560 x 1440        ││ 2560 x 1440        ││ 1920 x 1200 │   │
-│  │ 1  2  3 (4)        ││ 5  6  7  8         ││ 9  0        │   │
+│  │ 1  2  3 (4)        ││ 5  6· 7  8         ││ 9  0        │   │
 │  └────────────────────┘└────────────────────┘└─────────────┘   │
 │                                                                │
 │  Profile: all-monitors              [Identify][Cancel][Apply]  │
@@ -110,8 +110,8 @@ picture matches the desk.
 ```
 
 `(4)` is switched off: an outline with a line through it, and no keybinding. A
-dot in a pill's corner means `SUPER+L` has pinned that workspace's layout away
-from its monitor's setting.
+dot in a pill's corner (`6·`) means `SUPER+L` has pinned that workspace's
+layout against the global one.
 
 - **Drag** a workspace chip from one monitor to another.
 - **Click** a chip to switch that workspace off — or press its number key.
@@ -246,7 +246,6 @@ omarchy-workspaces apply               # regenerate rules, reload, re-home
 omarchy-workspaces bootstrap           # what the service runs; safe any time
 omarchy-workspaces disable 4,10        # switch workspaces off entirely
 omarchy-workspaces enable 4            # and back on
-omarchy-workspaces scrollable DP-5 on  # that monitor's workspaces scroll, not tile
 omarchy-workspaces layout 6 dwindle    # pin one workspace against its monitor
 omarchy-workspaces toggle-layout       # flip the active one (this is SUPER+L)
 omarchy-workspaces arrange DP-5 0x0 DP-7 2560x0   # move monitors on the desk
@@ -326,7 +325,7 @@ Anything that needs a live Hyprland is `doctor`'s job instead.
         "desc:Lenovo Group Limited T27QD-40 VNACDZ1G": [5, 6, 7, 8],
         "desc:AU Optronics B160UAN04.9": [9, 10]
       },
-      "scrollable": ["desc:Lenovo Group Limited T27QD-40 VNACDZ1G"]
+      "layouts": { "6": "scrolling" }
     },
     { "name": "only-eDP-1", "monitors": { "desc:AU Optronics B160UAN04.9": [1,2,3,4,5,6,7,8,9,10] } }
   ]
@@ -351,18 +350,13 @@ omarchy-workspaces detect --force --count=6
 `disabled` is optional and lists the workspaces that are switched off in that
 profile. They stay in `monitors` — off is a state, not a removal.
 
-`layouts` is optional and maps a workspace id to a layout name, pinning it away
-from whatever its monitor says. This is what `SUPER+L` writes.
-
-`scrollable` is optional and lists the monitors whose workspaces use Hyprland's
-`scrolling` layout instead of tiling. It is per profile and per monitor, because
-a wide desk display and a laptop panel rarely want the same answer. The editor
-puts a `⟷ Scroll` toggle on each monitor.
+`layouts` is optional and maps a workspace id to a layout name, pinning it
+against Hyprland's global `general.layout`. This is what `SUPER+L` writes.
 
 Every generated rule names a layout, including the tiling ones — `general.layout`
 normally, or `dwindle` when that is itself `scrolling`. Leaving the layout out of
 a rule does not restore the default: a reload with no layout leaves a workspace
-in whatever layout it last had, so turning `scrollable` back off would not be
+in whatever layout it last had, so toggling scrolling back off would not be
 undoable without a restart.
 
 ## Widget settings
@@ -382,18 +376,25 @@ for a workspace with no keybinding would offer something that does not work.
 
 ## Scrolling, and SUPER+L
 
-Layout is set at two levels. A monitor's `⟷ Scroll` toggle is the default for
-everything on it; a single workspace can be pinned away from that default, and
-the pin wins. The editor marks a pinned workspace with a dot.
+Layout is per workspace. `SUPER+L` toggles the one you are on between tiling
+and scrolling; anything you have not touched follows Hyprland's global
+`general.layout`. The editor marks a workspace carrying an override with a dot.
 
 ```bash
-omarchy-workspaces scrollable DP-5 on      # the whole monitor
-omarchy-workspaces layout 6 dwindle        # except this one
-omarchy-workspaces layout 6 default        # never mind, follow the monitor
+omarchy-workspaces layout 6 scrolling      # pin one workspace
+omarchy-workspaces layout 6 default        # back to the global layout
+omarchy-workspaces toggle-layout           # flip the active one; this is SUPER+L
 ```
 
-**`SUPER+L` is that second level.** Omarchy binds it to a per-workspace layout
-toggle whose result *persists*: stock, it writes
+There used to be a per-monitor `⟷ Scroll` toggle as well. It is gone: two
+controls for one property is one too many, and the keybinding is the one that
+was always going to be reached for. A config still carrying the old
+`scrollable` key is folded down the first time this plugin reads it — every
+workspace on a monitor that was set to scroll gets that as its own override,
+so the picture does not change — and any override you had set by hand survives
+the fold.
+
+**`SUPER+L` writes those overrides.** Omarchy binds it to a layout toggle whose result *persists*: stock, it writes
 `~/.local/state/omarchy/workspace-layouts/<id>.lua`, which `default.hypr.toggles`
 loads from `hyprland.lua` **after** `hypr/workspaces.lua`. A file written weeks
 ago therefore landed on top of every rule generated here, on every reload, and

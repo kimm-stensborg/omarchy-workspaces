@@ -101,12 +101,39 @@ has "points SUPER+L at this plugin"  "$LUA" "toggle-layout"
 seed
 run layout --profile desk 4 scrolling >/dev/null; run generate >/dev/null
 has "carries the layout override"    "$(cat "$WORK/ws.lua")" '[4] = "scrolling"'
-has "an override beats the monitor"  "$(cat "$WORK/ws.lua")" 'local function layout_for'
+has "layout comes from the override" "$(cat "$WORK/ws.lua")" 'local function layout_for'
 if command -v luac >/dev/null; then
   luac -p "$WORK/ws.lua" 2>/dev/null && ok "is valid Lua" || no "is valid Lua" "parses" "syntax error"
 else
   printf '  - skipped: luac not installed (is valid Lua)\n'
 fi
+
+echo
+echo "scrollable migration"
+cat >"$WORK/ws.json" <<'JSON'
+{ "version": 1, "persistent": true,
+  "profiles": [ { "name": "desk",
+    "monitors": { "desc:Left Panel L1": [1,2], "desc:Right Panel R1": [3,4] },
+    "scrollable": ["desc:Right Panel R1"] } ] }
+JSON
+run list >/dev/null 2>&1
+is "the legacy key is gone"        "$(cfg '.profiles[0] | has("scrollable")')" 'false'
+is "its monitor became overrides"  "$(cfg '.profiles[0].layouts')" '{"3":"scrolling","4":"scrolling"}'
+
+run list >/dev/null 2>&1
+is "migrating twice changes nothing" "$(cfg '.profiles[0].layouts')" '{"3":"scrolling","4":"scrolling"}'
+
+cat >"$WORK/ws.json" <<'JSON'
+{ "version": 1, "persistent": true,
+  "profiles": [ { "name": "desk",
+    "monitors": { "desc:Left Panel L1": [1,2], "desc:Right Panel R1": [3,4] },
+    "scrollable": ["desc:Right Panel R1"], "layouts": { "3": "dwindle" } } ] }
+JSON
+run list >/dev/null 2>&1
+is "an explicit override outlives the fold" "$(cfg '.profiles[0].layouts')" '{"3":"dwindle","4":"scrolling"}'
+seed
+run list >/dev/null 2>&1
+is "a config without it is untouched" "$(cfg '.profiles[0] | has("layouts")')" 'false'
 
 echo
 echo "workspace count"

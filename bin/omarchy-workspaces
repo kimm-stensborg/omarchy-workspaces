@@ -35,6 +35,28 @@ say() { ((QUIET)) || echo "$@"; }
 ensure_config() {
   [[ -f $CONFIG ]] || die "no config at $CONFIG — run '$0 bootstrap' first"
   jq -e '.version == 1' "$CONFIG" >/dev/null 2>&1 || die "$CONFIG is not a version 1 config"
+  migrate_scrollable
+}
+
+# Layout used to be settable per monitor as well as per workspace. Two controls
+# for one property is one too many now that SUPER+L writes the per-workspace
+# one, so the monitor-level setting is gone — but dropping it silently would
+# change what a screen is doing. Fold it down instead: every workspace on a
+# monitor that was set to scroll gets that as its own override, which is the
+# same picture expressed the one remaining way. Runs once; the key is removed
+# after, so this is a no-op on every later call.
+migrate_scrollable() {
+  jq -e 'any(.profiles[]; has("scrollable"))' "$CONFIG" >/dev/null 2>&1 || return 0
+  jq '
+    .profiles |= map(
+      if has("scrollable") then
+        . as $p
+        | (($p.scrollable // []) | map($p.monitors[.] // []) | add // []) as $ws
+        | .layouts = (($ws | map({ (tostring): "scrolling" }) | add // {}) + (.layouts // {}))
+        | del(.scrollable)
+        | (if (.layouts | length) == 0 then del(.layouts) else . end)
+      else . end)' "$CONFIG" | write_config
+  say "Folded the per-monitor scroll setting into per-workspace layouts."
 }
 
 write_config() { # stdin = new json
@@ -126,12 +148,10 @@ cmd_list() {
   jq -r --arg active "$active" --argjson keys "$KEY_SLOTS" '
     .profiles[]
     | (if .name == $active then "● " else "  " end) as $mark
-    | ((.scrollable // []) | map({ key: ., value: true }) | from_entries) as $scroll
     | ((.disabled // []) | map({ key: (. | tostring), value: true }) | from_entries) as $off
     | ($mark + .name + (if .name == $active then "  (active)" else "" end)),
       ( .monitors | to_entries[]
         | "      " + (.key | if startswith("desc:") then ltrimstr("desc:") else . end)
-          + (if $scroll[.key] then "  ⟷ scrolling" else "" end)
           + "\n        " + ([.value[]
               | (if . == $keys then "0" else tostring end) as $label
               | if $off[. | tostring] then "(" + $label + ")" else $label end] | join(" ")) ),
@@ -230,7 +250,7 @@ managed_workspaces() {
 # ~/.local/state/omarchy/workspace-layouts/<id>.lua, and `default.hypr.toggles`
 # loads that directory after hypr/workspaces.lua — so a stale file outranks the
 # rules generated here on every reload, forever. Clearing the ones covering our
-# own workspaces at apply time is what makes the scrollable toggle mean
+# own workspaces at apply time is what makes this plugin's layouts mean
 # something. SUPER+L keeps working; its choice just stops outliving an apply.
 LAYOUT_STATE="${OMARCHY_WORKSPACE_LAYOUTS:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/workspace-layouts}"
 
@@ -295,7 +315,6 @@ local profiles = {
 LUA
     jq -r '
       .profiles[] |
-      ((.scrollable // []) | map({ key: ., value: true }) | from_entries) as $scroll |
       "  { name = " + (.name | @json) + ", disabled = { " +
       ((.disabled // []) | map(tostring) | join(", ")) + " }, layouts = { " +
       (((.layouts // {}) | to_entries | map("[" + .key + "] = " + (.value | @json))) | join(", ")) +
@@ -303,8 +322,7 @@ LUA
       ( .monitors | to_entries | map(
           "    { selector = " + (.key | @json) + ", workspaces = { " +
           (.value | map(tostring) | join(", ")) +
-          " }, scrollable = " + (if $scroll[.key] then "true" else "false" end) +
-          " }," ) | join("\n") ) +
+          " } }," ) | join("\n") ) +
       "\n  } },"' "$CONFIG"
     local persistent self
     persistent=$(jq -r 'if .persistent == false then "false" else "true" end' "$CONFIG")
@@ -346,7 +364,7 @@ local function pick()
       local monitor = resolve(group.selector, byName, descs)
       if not monitor then ok = false break end
       resolved[#resolved + 1] =
-        { monitor = monitor, workspaces = group.workspaces, scrollable = group.scrollable }
+        { monitor = monitor, workspaces = group.workspaces }
     end
     if ok then
       local off = {}
@@ -359,9 +377,10 @@ end
 
 local active, groups, disabled, overrides = pick()
 
--- What a non-scrolling monitor gets. Whatever you have set globally, except
--- when that is itself `scrolling` — "scrollable off" has to mean tiling, and
--- then there is no global tiling layout left to fall back to.
+-- What a workspace gets with no override of its own: whatever you have set
+-- globally, except when that is itself `scrolling` — a workspace toggled off
+-- scrolling has to land on tiling, and then there is no global tiling layout
+-- left to fall back to.
 local function tiling_layout()
   local global = hl.get_config("general.layout")
   if type(global) ~= "string" or global == "" or global == "scrolling" then return "dwindle" end
@@ -370,19 +389,18 @@ end
 
 -- Every rule names a layout, including the non-scrolling ones. Leaving `layout`
 -- off does not restore the default: a reload with no layout in the rule leaves
--- a workspace sitting in whatever layout it last had, so turning scrollable
+-- a workspace sitting in whatever layout it last had, so toggling scrolling
 -- back off would be a change you could not undo without a restart.
 --
 -- A disabled workspace gets no rule at all. Nothing pins it, nothing makes it
 -- persistent, so it never appears on a bar or in the workspace list; its keys
 -- are unbound further down.
--- A workspace's own override beats its monitor's default. SUPER+L writes one
--- of those overrides, which is how a per-workspace keybinding and a per-monitor
--- setting end up being the same system rather than two that fight.
-local function layout_for(ws, group, tiling)
+-- Layout is per workspace and nothing else. SUPER+L writes these overrides;
+-- anything without one follows the global layout.
+local function layout_for(ws, tiling)
   local own = overrides[ws]
   if type(own) == "string" and own ~= "" then return own end
-  return group.scrollable and "scrolling" or tiling
+  return tiling
 end
 
 local function apply_rules()
@@ -394,7 +412,7 @@ local function apply_rules()
         hl.workspace_rule({
           workspace = tostring(ws),
           monitor = group.monitor.name,
-          layout = layout_for(ws, group, tiling),
+          layout = layout_for(ws, tiling),
           default = true,
           persistent = persistent,
         })
@@ -468,7 +486,7 @@ end
 -- requires that directory *after* this file, so on every reload those saved
 -- overrides land on top of the rules above and silently win. Re-asserting once
 -- the config has settled puts this plugin's answer last, which is what makes
--- the scrollable toggle stick. SUPER+L still works live; it just no longer
+-- the layout overrides stick. SUPER+L still works live; it just no longer
 -- outlives the next apply.
 local function settle()
   apply_rules()
@@ -628,16 +646,10 @@ cmd_bootstrap() {
 
 # ── per-workspace layout ─────────────────────────────────────────────────────
 
-# The layout a workspace would get from its monitor alone, with no override.
-monitor_default_layout() {
-  local ws=$1 profile=$2 idx sel global
-  idx=$(profile_index "$profile")
-  sel=$(jq -r --argjson i "$idx" --argjson w "$ws" \
-    '.profiles[$i].monitors | to_entries[] | select(.value | index($w)) | .key' "$CONFIG")
-  if [[ -n $sel ]] && jq -e --argjson i "$idx" --arg m "$sel" \
-      '((.profiles[$i].scrollable // []) | index($m)) != null' "$CONFIG" >/dev/null; then
-    echo scrolling; return
-  fi
+# What a workspace shows with no override: the global layout, or dwindle when
+# that is itself scrolling, since "not scrolling" has to mean something.
+default_layout() {
+  local global
   global=$(hyprctl getoption general:layout -j 2>/dev/null | jq -r '.str // ""')
   [[ -z $global || $global == "scrolling" ]] && echo dwindle || echo "$global"
 }
@@ -647,7 +659,7 @@ effective_layout() {
   idx=$(profile_index "$profile")
   own=$(jq -r --argjson i "$idx" --arg w "$ws" '.profiles[$i].layouts[$w] // ""' "$CONFIG")
   [[ -n $own ]] && { echo "$own"; return; }
-  monitor_default_layout "$ws" "$profile"
+  default_layout
 }
 
 # Pin one workspace to a layout, or hand it back to its monitor's setting.
@@ -698,7 +710,7 @@ cmd_toggle_layout() {
 
   # An override equal to the monitor's own setting is noise in the config, so
   # a toggle back to the default clears the entry rather than restating it.
-  if [[ $next == "$(monitor_default_layout "$ws" "$profile")" ]]; then
+  if [[ $next == "$(default_layout)" ]]; then
     QUIET=1 cmd_layout --profile "$profile" "$ws" default
   else
     QUIET=1 cmd_layout --profile "$profile" "$ws" "$next"
@@ -826,13 +838,7 @@ cmd_doctor() {
 
     local want own
     own=$(jq -r --argjson i "$idx" --arg w "$ws" '.profiles[$i].layouts[$w] // ""' "$CONFIG")
-    if [[ -n $own ]]; then
-      want="$own"
-    else
-      want="$tiling"
-      jq -e --argjson i "$idx" --arg m "$sel" \
-        '((.profiles[$i].scrollable // []) | index($m)) != null' "$CONFIG" >/dev/null && want="scrolling"
-    fi
+    [[ -n $own ]] && want="$own" || want="$tiling"
     local got; got=$(sed -n "s/.*\b$ws=\([^ ]*\).*/\1/p" <<<"$live_layout")
     [[ -n $got && $got != "gone" && $got != "$want" ]] && wronglayout+=("$ws is $got, want $want")
   done
@@ -867,13 +873,11 @@ cmd_edit() {
 # survive those names changing.
 cmd_set_layout() {
   ensure_config
-  local profile="" payload="" scroll="" offs=""
+  local profile="" payload="" offs=""
   while (($#)); do
     case $1 in
       --profile) profile=${2:?--profile needs a name}; shift 2 ;;
       --base64)  payload=$(base64 -d <<<"${2:?--base64 needs a value}"); shift 2 ;;
-      --scrollable-base64)
-                 scroll=$(base64 -d <<<"${2:?--scrollable-base64 needs a value}"); shift 2 ;;
       --disabled-base64)
                  offs=$(base64 -d <<<"${2:?--disabled-base64 needs a value}"); shift 2 ;;
       *)         payload=$1; shift ;;
@@ -898,25 +902,7 @@ cmd_set_layout() {
   jq --arg p "$profile" --argjson m "$mapped" '
     .profiles |= map(if .name == $p then .monitors = $m else . end)' "$CONFIG" | write_config
 
-  # Only when it was actually passed. A set-layout from a script has no opinion
-  # about scrolling, and silently clearing the flag would be one.
-  if [[ -n $scroll ]]; then
-    jq -e 'type == "array"' <<<"$scroll" >/dev/null 2>&1 ||
-      die "--scrollable-base64 payload is not a JSON array"
-    local scrollmapped
-    scrollmapped=$(jq -n --argjson names "$scroll" --argjson mons "$monitors" '
-      ( $mons
-        | map(select((.description // "") != "") | { key: .name, value: ("desc:" + .description) })
-        | from_entries ) as $selector
-      | $names | map($selector[.] // .) | unique')
-    jq --arg p "$profile" --argjson s "$scrollmapped" '
-      .profiles |= map(
-        if .name == $p then
-          (if ($s | length) == 0 then del(.scrollable) else .scrollable = $s end)
-        else . end)' "$CONFIG" | write_config
-  fi
-
-  # Same rule as --scrollable-base64: only when actually passed. A script that
+  # Only when actually passed. A script that
   # rearranges workspaces has no opinion about which are switched off.
   if [[ -n $offs ]]; then
     jq -e 'type == "array"' <<<"$offs" >/dev/null 2>&1 ||
@@ -932,32 +918,6 @@ cmd_set_layout() {
 }
 
 
-# Which monitors run the scrolling layout. Stored per profile, because a wide
-# desk monitor and a laptop panel rarely want the same answer.
-cmd_scrollable() {
-  ensure_config
-  local profile=""
-  [[ ${1:-} == --profile ]] && { profile=$2; shift 2; }
-  local monitor=${1:?usage: scrollable [--profile NAME] <monitor> <on|off>}
-  local mode=${2:?usage: scrollable [--profile NAME] <monitor> <on|off>}
-  case $mode in
-    on|true|yes)  mode=true ;;
-    off|false|no) mode=false ;;
-    *) die "scrollable takes 'on' or 'off'" ;;
-  esac
-  [[ -z $profile ]] && profile=$(active_profile || die "no active profile; pass --profile")
-
-  local selector; selector=$(selector_for "$monitor")
-
-  jq --arg p "$profile" --arg m "$selector" --argjson on "$mode" '
-    .profiles |= map(
-      if .name == $p then
-        .scrollable = (((.scrollable // []) - [$m]) + (if $on then [$m] else [] end) | unique)
-        | (if (.scrollable | length) == 0 then del(.scrollable) else . end)
-      else . end)' "$CONFIG" | write_config
-
-  say "Scrolling layout on $monitor in profile '$profile': $mode"
-}
 
 # ── monitor arrangement ──────────────────────────────────────────────────────
 #
@@ -1144,7 +1104,6 @@ omarchy-workspaces — pin Hyprland workspaces to specific monitors
   generate                         Write ~/.config/hypr/workspaces.lua
   apply                            Generate, reload Hyprland, re-home workspaces
   edit                             Open the config in your editor
-  scrollable <monitor> <on|off>    Monitor's workspaces scroll instead of tile
   layout <ws> <scrolling|dwindle|default>
                                    Pin one workspace's layout, or clear it
   toggle-layout                    Flip the active workspace (bound to SUPER+L)
@@ -1180,7 +1139,6 @@ main() {
     apply)    cmd_apply ;;
     edit)     cmd_edit ;;
     open)     cmd_open ;;
-    scrollable) shift; cmd_scrollable "$@" ;;
     layout)   shift; cmd_layout "$@" ;;
     toggle-layout) cmd_toggle_layout ;;
     arrange|set-monitors) shift; cmd_arrange "$@" ;;

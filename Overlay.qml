@@ -68,11 +68,6 @@ Item {
   // entirely empty profile is indistinguishable from a full one by the time
   // anything gets to look, because the fill has already placed all ten.
   property int placedByConfig: 0
-
-  // Workspace id -> layout name, for the ones SUPER+L has pinned away from
-  // their monitor's setting. Read-only here: the editor shows them so the
-  // picture is not lying, but the key is what sets them.
-  property var layouts: ({})
   // The desk arrangement being edited, keyed by live output name. Seeded from
   // Hyprland, moved by dragging a monitor, written back as the `position` of
   // each monitor in ~/.config/hypr/monitors.lua.
@@ -317,7 +312,6 @@ Item {
 
     root.assignments = next
     root.disabled = ((profileFound && profileFound.disabled) || []).slice()
-    root.layouts = (profileFound && profileFound.layouts) || ({})
     root.hideEmpty = root.currentHideEmpty()
     root.initialHideEmpty = root.hideEmpty
     root.seedGeometry()
@@ -377,13 +371,6 @@ Item {
 
   function isDisabled(id) {
     return root.disabled.indexOf(id) !== -1
-  }
-
-  // Non-empty when this workspace has been pinned away from whatever its
-  // monitor would otherwise give it.
-  function layoutOverride(id) {
-    var own = root.layouts[String(id)]
-    return typeof own === "string" ? own : ""
   }
 
   // Dragging is how a workspace changes monitor, so a click is free to mean
@@ -1241,12 +1228,14 @@ Item {
           width: parent.width
           height: Style.spacing.controlHeight
 
+          // Which profile won is this plugin's business, not the reader's, so
+          // it is not shown. That no profile won at all is very much theirs:
+          // it is why the picture is empty and nothing they do here will stick.
           Text {
+            visible: root.profileName === ""
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
-            text: root.profileName
-              ? "Profile: " + root.profileName
-              : "No profile matches the connected monitors"
+            text: "No saved layout matches the monitors that are plugged in"
             color: root.foreground
             opacity: 0.5
             font.family: root.fontFamily
@@ -1341,19 +1330,6 @@ Item {
       font.family: chip.ui.fontFamily
       font.pixelSize: Style.font.subtitle
       textFormat: Text.PlainText
-    }
-
-    // Pinned by SUPER+L to something its monitor does not say. Worth showing:
-    // without it the Scroll toggle looks like it is lying about that pill.
-    Rectangle {
-      visible: !chip.off && chip.ui.layoutOverride(chip.modelData) !== ""
-      anchors.top: parent.top
-      anchors.right: parent.right
-      anchors.margins: 3
-      width: 5
-      height: 5
-      radius: 2.5
-      color: chip.ui.accent
     }
 
     // A line through the number, so the state survives a colourblind reading

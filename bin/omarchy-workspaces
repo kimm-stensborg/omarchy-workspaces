@@ -309,6 +309,10 @@ for _, ws in ipairs(disabled_list) do disabled[ws] = true end
 local function connected()
   local byName, descs = {}, {}
   for _, m in ipairs(hl.get_monitors() or {}) do
+    -- Tools that dry-run hyprland.lua (omarchy-menu-keybindings) stub hl with
+    -- a table whose every index is non-nil, so ipairs would never end.
+    -- Real monitors are userdata, so test the field rather than the type.
+    if type(m.name) ~= "string" then break end
     byName[m.name] = m
     descs[#descs + 1] = { desc = m.description or "", monitor = m }
   end

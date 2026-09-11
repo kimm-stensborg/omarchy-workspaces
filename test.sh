@@ -98,6 +98,7 @@ has "re-asserts after settling"      "$LUA" "hl.timer(settle"
 has "unbinds all three variants"     "$LUA" 'hl.unbind("SUPER + SHIFT + ALT + " .. code)'
 has "takes SUPER+L off Omarchy"      "$LUA" 'hl.unbind("SUPER + L")'
 has "points SUPER+L at this plugin"  "$LUA" "toggle-layout"
+has "names the script by absolute path" "$LUA" "local toggle_cmd = \"bash '/"
 seed
 run layout --profile desk 4 scrolling >/dev/null; run generate >/dev/null
 has "carries the layout override"    "$(cat "$WORK/ws.lua")" '[4] = "scrolling"'

@@ -98,13 +98,6 @@ active_profile() {
   return 1
 }
 
-# How many workspaces this setup has. Ten unless the config says otherwise.
-workspace_count() {
-  local n
-  n=$(jq -r '.count // 10' "$CONFIG" 2>/dev/null)
-  [[ $n =~ ^[0-9]+$ ]] && ((n > 0)) && echo "$n" || echo "$KEY_SLOTS"
-}
-
 profile_index() {
   jq --arg n "$1" '[.profiles[].name] | index($n) // -1' "$CONFIG"
 }
@@ -662,7 +655,7 @@ effective_layout() {
   default_layout
 }
 
-# Pin one workspace to a layout, or hand it back to its monitor's setting.
+# Pin one workspace to a layout, or hand it back to the global one.
 cmd_layout() {
   ensure_config
   local profile=""
@@ -770,12 +763,30 @@ cmd_doctor() {
   else
     local tmp live; tmp=$(mktemp); live="$GENERATED"
     GENERATED="$tmp" QUIET=1 cmd_generate
-    if diff -q "$tmp" "$live" >/dev/null 2>&1; then
+    # The generated file embeds the absolute path of whichever copy of this
+    # script wrote it, so a repo checkout and the installed plugin produce
+    # files that differ on that line and nothing else. Comparing it would
+    # report "stale" whenever the two are not the same copy, which is a false
+    # alarm, and a check that cries wolf is worse than no check. The path is
+    # verified on its own terms just below instead.
+    if diff -q <(grep -v '^local toggle_cmd = ' "$tmp") \
+               <(grep -v '^local toggle_cmd = ' "$live") >/dev/null 2>&1; then
       ok "workspaces.lua matches the config"
     else
       bad "workspaces.lua is stale — the config changed since the last apply"
     fi
     rm -f "$tmp"
+
+    # What that line points at has to exist, or SUPER+L does nothing.
+    local bound_to
+    bound_to=$(sed -n "s/^local toggle_cmd = \"bash '\(.*\)' toggle-layout\"$/\1/p" "$live")
+    if [[ -z $bound_to ]]; then
+      bad "workspaces.lua has no SUPER+L command in it"
+    elif [[ ! -r $bound_to ]]; then
+      bad "SUPER+L points at $bound_to, which is not there"
+    else
+      ok "SUPER+L points at a script that exists"
+    fi
   fi
 
   grep -q 'hypr.workspaces' "$HOME/.config/hypr/hyprland.lua" 2>/dev/null \

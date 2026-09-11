@@ -244,9 +244,11 @@ omarchy-workspaces apply               # regenerate rules, reload, re-home
 omarchy-workspaces bootstrap           # what the service runs; safe any time
 omarchy-workspaces disable 4,10        # switch workspaces off entirely
 omarchy-workspaces enable 4            # and back on
-omarchy-workspaces layout 6 dwindle    # pin one workspace against its monitor
+omarchy-workspaces layout 6 dwindle    # pin one workspace against the global layout
 omarchy-workspaces toggle-layout       # flip the active one (this is SUPER+L)
 omarchy-workspaces arrange DP-5 0x0 DP-7 2560x0   # move monitors on the desk
+omarchy-workspaces generate            # write the rules without reloading
+omarchy-workspaces edit                # open the config in $EDITOR
 omarchy-workspaces open                # the visual editor
 ```
 
@@ -266,9 +268,10 @@ omarchy-workspaces doctor
 ```
 
 It asks Hyprland rather than assuming, and checks: the generated Lua is ours
-and current, the `require` is in place, no saved `SUPER+L` override outranks
-us, every workspace is on its home monitor and in the layout the config asks
-for, and every switched-off workspace really is unbound. It exits non-zero on
+and current, the `require` is in place, `SUPER+L` is bound here and points at
+a script that exists, no saved `SUPER+L` override outranks us, every workspace
+is on its home monitor and in the layout the config asks for, and every
+switched-off workspace really is unbound. It exits non-zero on
 any drift, so a hook or a keybinding can watch it too.
 
 `apply` runs it before claiming success, and reports what does not match rather
@@ -276,13 +279,18 @@ than printing "Applied" over the top of it.
 
 ```
 Profile:  all-monitors
+Config:   /home/you/.config/omarchy/workspaces.json
 
   ✓ workspaces.lua matches the config
+  ✓ SUPER+L points at a script that exists
   ✓ hyprland.lua requires hypr.workspaces
   ✗ saved SUPER+L layout override(s) outrank this plugin: workspace 2 7
   ✓ SUPER+L is bound to this plugin's layout toggle
   ✓ placement: all 10 workspaces on their home monitor
   ✗ layout: 2 is scrolling, want dwindle
+  ✓ keys: 10 bound, 0 unbound
+
+2 problem(s). Run 'omarchy-workspaces apply' to reconcile.
 ```
 
 Almost everything it finds is fixed by running `apply`.

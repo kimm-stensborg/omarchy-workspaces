@@ -279,19 +279,23 @@ LUA
       .profiles[] |
       ((.scrollable // []) | map({ key: ., value: true }) | from_entries) as $scroll |
       "  { name = " + (.name | @json) + ", disabled = { " +
-      ((.disabled // []) | map(tostring) | join(", ")) + " }, monitors = {\n" +
+      ((.disabled // []) | map(tostring) | join(", ")) + " }, layouts = { " +
+      (((.layouts // {}) | to_entries | map("[" + .key + "] = " + (.value | @json))) | join(", ")) +
+      " }, monitors = {\n" +
       ( .monitors | to_entries | map(
           "    { selector = " + (.key | @json) + ", workspaces = { " +
           (.value | map(tostring) | join(", ")) +
           " }, scrollable = " + (if $scroll[.key] then "true" else "false" end) +
           " }," ) | join("\n") ) +
       "\n  } },"' "$CONFIG"
-    local persistent
+    local persistent self
     persistent=$(jq -r 'if .persistent == false then "false" else "true" end' "$CONFIG")
+    self=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")
     cat <<LUA
 }
 
 local persistent = $persistent
+local toggle_cmd = "bash '$self' toggle-layout"
 LUA
     cat <<'LUA'
 
@@ -328,13 +332,13 @@ local function pick()
     if ok then
       local off = {}
       for _, ws in ipairs(profile.disabled or {}) do off[ws] = true end
-      return profile.name, resolved, off
+      return profile.name, resolved, off, (profile.layouts or {})
     end
   end
-  return nil, nil, {}
+  return nil, nil, {}, {}
 end
 
-local active, groups, disabled = pick()
+local active, groups, disabled, overrides = pick()
 
 -- What a non-scrolling monitor gets. Whatever you have set globally, except
 -- when that is itself `scrolling` — "scrollable off" has to mean tiling, and
@@ -353,6 +357,15 @@ end
 -- A disabled workspace gets no rule at all. Nothing pins it, nothing makes it
 -- persistent, so it never appears on a bar or in the workspace list; its keys
 -- are unbound further down.
+-- A workspace's own override beats its monitor's default. SUPER+L writes one
+-- of those overrides, which is how a per-workspace keybinding and a per-monitor
+-- setting end up being the same system rather than two that fight.
+local function layout_for(ws, group, tiling)
+  local own = overrides[ws]
+  if type(own) == "string" and own ~= "" then return own end
+  return group.scrollable and "scrolling" or tiling
+end
+
 local function apply_rules()
   if not groups then return end
   local tiling = tiling_layout()
@@ -362,7 +375,7 @@ local function apply_rules()
         hl.workspace_rule({
           workspace = tostring(ws),
           monitor = group.monitor.name,
-          layout = group.scrollable and "scrolling" or tiling,
+          layout = layout_for(ws, group, tiling),
           default = true,
           persistent = persistent,
         })
@@ -404,6 +417,15 @@ local function apply_binds()
       hl.unbind("SUPER + SHIFT + ALT + " .. code)
     end
   end
+
+  -- Omarchy binds SUPER+L to its own layout toggle, which saves the result to
+  -- ~/.local/state/omarchy/workspace-layouts and is loaded after this file --
+  -- so left alone it would keep writing a second, competing answer that wins
+  -- on every reload. Point the same key at the same job done against this
+  -- plugin's config instead. The key still toggles the active workspace
+  -- between tiling and scrolling; only the place it records that changes.
+  hl.unbind("SUPER + L")
+  hl.bind("SUPER + L", hl.dsp.exec_cmd(toggle_cmd), { description = "Toggle workspace layout" })
 end
 
 -- Omarchy's own SUPER+L layout toggle persists its choice to
@@ -569,6 +591,92 @@ cmd_bootstrap() {
   fi
 }
 
+# ── per-workspace layout ─────────────────────────────────────────────────────
+
+# The layout a workspace would get from its monitor alone, with no override.
+monitor_default_layout() {
+  local ws=$1 profile=$2 idx sel global
+  idx=$(profile_index "$profile")
+  sel=$(jq -r --argjson i "$idx" --argjson w "$ws" \
+    '.profiles[$i].monitors | to_entries[] | select(.value | index($w)) | .key' "$CONFIG")
+  if [[ -n $sel ]] && jq -e --argjson i "$idx" --arg m "$sel" \
+      '((.profiles[$i].scrollable // []) | index($m)) != null' "$CONFIG" >/dev/null; then
+    echo scrolling; return
+  fi
+  global=$(hyprctl getoption general:layout -j 2>/dev/null | jq -r '.str // ""')
+  [[ -z $global || $global == "scrolling" ]] && echo dwindle || echo "$global"
+}
+
+effective_layout() {
+  local ws=$1 profile=$2 own idx
+  idx=$(profile_index "$profile")
+  own=$(jq -r --argjson i "$idx" --arg w "$ws" '.profiles[$i].layouts[$w] // ""' "$CONFIG")
+  [[ -n $own ]] && { echo "$own"; return; }
+  monitor_default_layout "$ws" "$profile"
+}
+
+# Pin one workspace to a layout, or hand it back to its monitor's setting.
+cmd_layout() {
+  ensure_config
+  local profile=""
+  [[ ${1:-} == --profile ]] && { profile=$2; shift 2; }
+  local ws=${1:?usage: layout [--profile NAME] <workspace> <scrolling|dwindle|default>}
+  local want=${2:?usage: layout [--profile NAME] <workspace> <scrolling|dwindle|default>}
+  [[ $ws =~ ^[0-9]+$ ]] || die "not a workspace number: '$ws'"
+  ((ws == 0)) && ws=10
+  [[ -z $profile ]] && profile=$(active_profile || die "no active profile; pass --profile")
+
+  case $want in
+    default|auto|clear)
+      jq --arg p "$profile" --arg w "$ws" '
+        .profiles |= map(if .name == $p then
+          (.layouts // {}) as $l | .layouts = ($l | del(.[$w]))
+          | (if (.layouts | length) == 0 then del(.layouts) else . end)
+        else . end)' "$CONFIG" | write_config
+      say "Workspace $ws follows its monitor again." ;;
+    scrolling|dwindle|master)
+      jq --arg p "$profile" --arg w "$ws" --arg v "$want" '
+        .profiles |= map(if .name == $p then .layouts = ((.layouts // {}) + { ($w): $v }) else . end)' \
+        "$CONFIG" | write_config
+      say "Workspace $ws pinned to $want." ;;
+    *) die "layout takes scrolling, dwindle, or default" ;;
+  esac
+}
+
+# What SUPER+L runs. Omarchy's own toggle saves to a state directory this
+# plugin cannot see into without a fight; this does the same job against the
+# one config that is already the source of truth, so the two stop disagreeing.
+#
+# It runs on a keypress, so it stays off the slow paths: no `apply`, no
+# `hyprctl reload`. The rule goes in live, and the generated Lua is rewritten
+# to match *before* the config is saved, so the service's watcher finds nothing
+# to reconcile and does not bounce the compositor a second later.
+cmd_toggle_layout() {
+  ensure_config
+  local ws profile current next
+  ws=$(hyprctl activeworkspace -j | jq -r '.id')
+  [[ $ws =~ ^[0-9]+$ ]] || die "no active workspace"
+  profile=$(active_profile) || die "no profile matches the connected monitors"
+
+  current=$(effective_layout "$ws" "$profile")
+  [[ $current == scrolling ]] && next=dwindle || next=scrolling
+
+  # An override equal to the monitor's own setting is noise in the config, so
+  # a toggle back to the default clears the entry rather than restating it.
+  if [[ $next == "$(monitor_default_layout "$ws" "$profile")" ]]; then
+    QUIET=1 cmd_layout --profile "$profile" "$ws" default
+  else
+    QUIET=1 cmd_layout --profile "$profile" "$ws" "$next"
+  fi
+
+  QUIET=1 cmd_generate
+  hyprctl eval "hl.workspace_rule({ workspace = \"$ws\", layout = \"$next\" })" >/dev/null 2>&1
+
+  omarchy-cmd-present omarchy-notification-send &&
+    omarchy-notification-send -g 󱂬 "Workspace $ws layout set to $next" >/dev/null 2>&1
+  say "Workspace $ws is now $next."
+}
+
 # ── doctor ───────────────────────────────────────────────────────────────────
 #
 # Compare what the config asks for against what Hyprland is actually doing.
@@ -638,6 +746,12 @@ cmd_doctor() {
     ok "no competing SUPER+L layout overrides"
   fi
 
+  if hyprctl binds -j | jq -e '[.[] | select(.description == "Toggle workspace layout")] | length == 1' >/dev/null; then
+    ok "SUPER+L is bound to this plugin's layout toggle"
+  else
+    bad "SUPER+L is not bound to this plugin — Omarchy's toggle will write a competing answer"
+  fi
+
   # ── live state, gathered once ─────────────────────────────────────────────
   local live_place live_layout live_binds tiling
   live_place=$(hyprctl workspaces -j | jq -r '[.[] | select(.id > 0) | "\(.id)=\(.monitor)"] | join(" ")')
@@ -675,9 +789,15 @@ cmd_doctor() {
     actual=$(sed -n "s/.*\b$ws=\([^ ]*\).*/\1/p" <<<"$live_place")
     [[ -n $actual && $actual != "$home" ]] && misplaced+=("$ws on $actual, home is $home")
 
-    local want="$tiling"
-    jq -e --argjson i "$idx" --arg m "$sel" \
-      '((.profiles[$i].scrollable // []) | index($m)) != null' "$CONFIG" >/dev/null && want="scrolling"
+    local want own
+    own=$(jq -r --argjson i "$idx" --arg w "$ws" '.profiles[$i].layouts[$w] // ""' "$CONFIG")
+    if [[ -n $own ]]; then
+      want="$own"
+    else
+      want="$tiling"
+      jq -e --argjson i "$idx" --arg m "$sel" \
+        '((.profiles[$i].scrollable // []) | index($m)) != null' "$CONFIG" >/dev/null && want="scrolling"
+    fi
     local got; got=$(sed -n "s/.*\b$ws=\([^ ]*\).*/\1/p" <<<"$live_layout")
     [[ -n $got && $got != "gone" && $got != "$want" ]] && wronglayout+=("$ws is $got, want $want")
   done
@@ -990,6 +1110,9 @@ omarchy-workspaces — pin Hyprland workspaces to specific monitors
   apply                            Generate, reload Hyprland, re-home workspaces
   edit                             Open the config in your editor
   scrollable <monitor> <on|off>    Monitor's workspaces scroll instead of tile
+  layout <ws> <scrolling|dwindle|default>
+                                   Pin one workspace's layout, or clear it
+  toggle-layout                    Flip the active workspace (bound to SUPER+L)
   arrange <mon> <XxY> [...]        Move monitors on the desk (rewrites monitors.lua)
   set-layout --base64 <b64>        Replace a whole profile (used by the overlay)
 
@@ -1022,6 +1145,8 @@ main() {
     edit)     cmd_edit ;;
     open)     cmd_open ;;
     scrollable) shift; cmd_scrollable "$@" ;;
+    layout)   shift; cmd_layout "$@" ;;
+    toggle-layout) cmd_toggle_layout ;;
     arrange|set-monitors) shift; cmd_arrange "$@" ;;
     set-layout) shift; cmd_set_layout "$@" ;;
     -h|--help|help) usage ;;

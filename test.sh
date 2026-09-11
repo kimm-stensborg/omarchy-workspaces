@@ -26,6 +26,7 @@ seed() {
     { "name": "solo", "monitors": { "desc:Left Panel L1": [1,2,3,4,5] } } ] }
 JSON
 }
+b64() { printf '%s' "$1" | base64 -w0; }
 run() { OMARCHY_WORKSPACES_CONFIG="$WORK/ws.json" OMARCHY_WORKSPACES_LUA="$WORK/ws.lua" bash "$CLI" "$@" 2>&1; }
 cfg() { jq -c "$1" "$WORK/ws.json"; }
 
@@ -53,7 +54,6 @@ is "the key goes when the last does" "$(cfg '.profiles[0] | has("disabled")')" '
 echo
 echo "set-layout"
 seed
-b64() { printf '%s' "$1" | base64 -w0; }
 run set-layout --profile desk --base64 "$(b64 '{"L":[1,2],"R":[3,4,5]}')" --disabled-base64 "$(b64 '[5]')" >/dev/null
 is "disabled is stored"            "$(cfg '.profiles[0].disabled')" '[5]'
 is "an unknown name is kept as-is" "$(cfg '.profiles[0].monitors | keys')" '["L","R"]'
@@ -70,6 +70,23 @@ has "a command needing a live profile says so" \
   "$(run disable 2)" "no active profile"
 
 echo
+echo "per-workspace layout"
+seed
+run layout --profile desk 2 scrolling >/dev/null
+is "an override is stored"        "$(cfg '.profiles[0].layouts')" '{"2":"scrolling"}'
+run layout --profile desk 2 default >/dev/null
+is "default clears the entry"     "$(cfg '.profiles[0] | has("layouts")')" 'false'
+has "a junk layout is refused"    "$(run layout --profile desk 2 sideways)" "scrolling, dwindle, or default"
+has "a junk workspace is refused" "$(run layout --profile desk nine dwindle)" "not a workspace number"
+seed
+run layout --profile desk 0 scrolling >/dev/null
+is "0 means ten here too"         "$(cfg '.profiles[0].layouts')" '{"10":"scrolling"}'
+seed
+run layout --profile desk 2 scrolling >/dev/null
+run set-layout --profile desk --base64 "$(b64 '{"L":[1,2]}')" >/dev/null
+is "the editor does not drop overrides" "$(cfg '.profiles[0].layouts')" '{"2":"scrolling"}'
+
+echo
 echo "generated lua"
 seed
 run disable --profile desk 3 >/dev/null; run generate >/dev/null
@@ -79,6 +96,12 @@ has "lists the disabled workspace"   "$LUA" 'disabled = { 3 }'
 has "keeps the desc: selector"       "$LUA" 'selector = "desc:Left Panel L1"'
 has "re-asserts after settling"      "$LUA" "hl.timer(settle"
 has "unbinds all three variants"     "$LUA" 'hl.unbind("SUPER + SHIFT + ALT + " .. code)'
+has "takes SUPER+L off Omarchy"      "$LUA" 'hl.unbind("SUPER + L")'
+has "points SUPER+L at this plugin"  "$LUA" "toggle-layout"
+seed
+run layout --profile desk 4 scrolling >/dev/null; run generate >/dev/null
+has "carries the layout override"    "$(cat "$WORK/ws.lua")" '[4] = "scrolling"'
+has "an override beats the monitor"  "$(cat "$WORK/ws.lua")" 'local function layout_for'
 if command -v luac >/dev/null; then
   luac -p "$WORK/ws.lua" 2>/dev/null && ok "is valid Lua" || no "is valid Lua" "parses" "syntax error"
 else

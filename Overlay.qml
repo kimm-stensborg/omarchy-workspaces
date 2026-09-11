@@ -49,6 +49,11 @@ Item {
   property var assignments: ({})
   // Workspace ids that are switched off. They still belong to a monitor.
   property var disabled: []
+
+  // Workspace id -> layout name, for the ones SUPER+L has pinned away from
+  // their monitor's setting. Read-only here: the editor shows them so the
+  // picture is not lying, but the key is what sets them.
+  property var layouts: ({})
   // Live output name -> bool. Which monitors run Hyprland's scrolling layout
   // instead of tiling; a per-monitor choice, because a wide desk display and a
   // laptop panel rarely want the same one.
@@ -290,6 +295,7 @@ Item {
 
     root.assignments = next
     root.disabled = ((profileFound && profileFound.disabled) || []).slice()
+    root.layouts = (profileFound && profileFound.layouts) || ({})
     root.scrollable = nextScroll
     root.hideEmpty = root.currentHideEmpty()
     root.initialHideEmpty = root.hideEmpty
@@ -365,6 +371,13 @@ Item {
 
   function isDisabled(id) {
     return root.disabled.indexOf(id) !== -1
+  }
+
+  // Non-empty when this workspace has been pinned away from whatever its
+  // monitor would otherwise give it.
+  function layoutOverride(id) {
+    var own = root.layouts[String(id)]
+    return typeof own === "string" ? own : ""
   }
 
   // Dragging is how a workspace changes monitor, so a click is free to mean
@@ -1351,6 +1364,19 @@ Item {
       font.family: chip.ui.fontFamily
       font.pixelSize: Style.font.subtitle
       textFormat: Text.PlainText
+    }
+
+    // Pinned by SUPER+L to something its monitor does not say. Worth showing:
+    // without it the Scroll toggle looks like it is lying about that pill.
+    Rectangle {
+      visible: !chip.off && chip.ui.layoutOverride(chip.modelData) !== ""
+      anchors.top: parent.top
+      anchors.right: parent.right
+      anchors.margins: 3
+      width: 5
+      height: 5
+      radius: 2.5
+      color: chip.ui.accent
     }
 
     // A line through the number, so the state survives a colourblind reading

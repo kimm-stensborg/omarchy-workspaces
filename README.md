@@ -31,7 +31,7 @@ All ship with Omarchy and are present on a stock install:
 | `hyprland` | `hyprctl` — reading monitors, reloading, moving workspaces |
 | `jq` | every config read and write in `bin/omarchy-workspaces` |
 | `awk` | rewriting monitor positions in `monitors.lua` (`arrange`) |
-| `gum` | the optional terminal TUI (`menu`) only |
+| `diffutils` | `doctor`, to tell a stale generated file from a current one |
 
 Nothing is downloaded or installed at runtime.
 
@@ -234,6 +234,7 @@ Do not put that symlink *inside* the plugin folder — `omarchy plugin validate`
 refuses a plugin containing symlinks, and `omarchy plugin update` would fail.
 
 ```bash
+omarchy-workspaces doctor              # does the live state match the config?
 omarchy-workspaces status              # where each workspace lives right now
 omarchy-workspaces list                # every profile and its assignments
 omarchy-workspaces assign DP-7 1-4     # assign; accepts 1-4, 1,2,5, or 0 for 10
@@ -243,13 +244,55 @@ omarchy-workspaces disable 4,10        # switch workspaces off entirely
 omarchy-workspaces enable 4            # and back on
 omarchy-workspaces scrollable DP-5 on  # that monitor's workspaces scroll, not tile
 omarchy-workspaces arrange DP-5 0x0 DP-7 2560x0   # move monitors on the desk
-omarchy-workspaces hide-empty on       # bar draws only workspaces holding windows
-omarchy-workspaces menu                # interactive TUI, for a terminal
 omarchy-workspaces open                # the visual editor
 ```
 
 `assign` takes a live output name and stores the stable `desc:` selector for it,
 so you never have to type a monitor description by hand.
+
+## Checking it actually worked
+
+Everything this plugin writes lands in a file it does not own, beside other
+things that write to the same place. When one of those wins, nothing says so:
+`apply` reloads, prints a success line, and the disagreement sits there until
+someone notices the screen is not doing what the config says. Every bug this
+plugin has had was that shape.
+
+```bash
+omarchy-workspaces doctor
+```
+
+It asks Hyprland rather than assuming, and checks: the generated Lua is ours
+and current, the `require` is in place, no saved `SUPER+L` override outranks
+us, every workspace is on its home monitor and in the layout the config asks
+for, and every switched-off workspace really is unbound. It exits non-zero on
+any drift, so a hook or a keybinding can watch it too.
+
+`apply` runs it before claiming success, and reports what does not match rather
+than printing "Applied" over the top of it.
+
+```
+Profile:  all-monitors
+
+  ✓ workspaces.lua matches the config
+  ✓ hyprland.lua requires hypr.workspaces
+  ✗ saved SUPER+L layout override(s) outrank this plugin: workspace 2 7
+  ✓ placement: all 10 workspaces on their home monitor
+  ✗ layout: 2 is scrolling, want dwindle
+```
+
+Almost everything it finds is fixed by running `apply`.
+
+## Tests
+
+```bash
+./test.sh
+```
+
+Covers the parts that are pure — argument parsing, the config transforms, and
+the shape of the generated Lua — against a fixed two-monitor fixture, so the
+results do not depend on what is plugged into the machine running them.
+Anything that needs a live Hyprland is `doctor`'s job instead.
 
 ## Files
 
@@ -308,7 +351,11 @@ Set these inline on the widget's entry in `~/.config/omarchy/shell.json`:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `hideEmpty` | `false` | Draw only the workspaces that hold windows, instead of every workspace assigned to this monitor. The focused workspace is always drawn, however empty. The editor's toggle sets this. |
+| `hideEmpty` | `false` | Draw only the workspaces that hold windows, instead of every workspace assigned to this monitor. The focused workspace is always drawn, however empty. |
+
+That entry belongs to the shell, not to this plugin, so it is set the supported
+way — `omarchy bar set io.github.kimm-stensborg.workspaces hideEmpty true`, which
+is also what the editor's **Hide empty** toggle calls.
 
 Switched-off workspaces are never drawn, whatever `hideEmpty` says — a button
 for a workspace with no keybinding would offer something that does not work.

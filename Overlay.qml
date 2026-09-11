@@ -420,8 +420,13 @@ Item {
       + Qt.btoa(JSON.stringify(payload))
       + " --scrollable-base64 " + Qt.btoa(JSON.stringify(scrolling))
       + " --disabled-base64 " + Qt.btoa(JSON.stringify(root.disabled)) + " --quiet"
+    // `hideEmpty` lives on this widget's entry in shell.json, which belongs to
+    // the shell, not to this plugin. `omarchy bar set` is the supported way in;
+    // hand-editing that file from here was one more owner of somebody else's
+    // state, which is the thing that has bitten this plugin every time.
     if (root.hideEmpty !== root.initialHideEmpty)
-      command += " && " + run + "hide-empty " + (root.hideEmpty ? "on" : "off") + " --quiet"
+      command += " && omarchy bar set " + Util.shellQuote(root.pluginId)
+        + " hideEmpty " + (root.hideEmpty ? "true" : "false") + " --json"
     command += " && " + run + "apply --quiet"
 
     Quickshell.execDetached(["bash", "-c", command])

@@ -48,16 +48,36 @@ BarWidget {
 
   // ── monitors ──────────────────────────────────────────────────────────────
 
-  // The bar builds one surface per screen, so the window this widget lives in
-  // is what tells us which monitor we are speaking for.
-  readonly property string screenName: {
+  // Read as a property, not only inside a function, so `ids` re-evaluates when
+  // Hyprland finishes enumerating monitors. A function call from a binding is
+  // easy for QML to treat as a constant — which is how the bar could open on
+  // the stock 1–10 fallback and never leave it, even after the config loaded.
+  readonly property var hyprMonitors: Hyprland.monitors ? Hyprland.monitors.values : []
+  readonly property var hyprWorkspaces: Hyprland.workspaces ? Hyprland.workspaces.values : []
+
+  readonly property var windowScreen: {
     var window = root.QsWindow ? root.QsWindow.window : null
-    return window && window.screen ? String(window.screen.name || "") : ""
+    return window && window.screen ? window.screen : null
+  }
+
+  // Hyprland.monitorFor maps a Quickshell screen onto the compositor's output
+  // name. Comparing screen.name to monitor.name directly is the same string on
+  // a good day and an empty match after a plugin reload — every bar then falls
+  // through to the stock 1–10 list, which is how the overlay and the bar stop
+  // agreeing.
+  readonly property string screenName: {
+    var screen = root.windowScreen
+    if (!screen) return ""
+    if (typeof Hyprland.monitorFor === "function") {
+      var hypr = Hyprland.monitorFor(screen)
+      if (hypr && hypr.name) return String(hypr.name)
+    }
+    return String(screen.name || "")
   }
 
   function monitorList() {
     var out = []
-    var values = Hyprland.monitors ? Hyprland.monitors.values : []
+    var values = root.hyprMonitors
     for (var i = 0; i < values.length; i++) {
       var monitor = values[i]
       var ipc = monitor.lastIpcObject
@@ -87,31 +107,63 @@ BarWidget {
     return ""
   }
 
-  // The one layout on disk, filtered to this screen. A switched-off workspace
-  // has no rule and no keybinding, so it cannot be reached at all; drawing a
-  // button for it would offer something that does not work, so they are
-  // filtered out rather than dimmed.
+  // The one layout on disk, filtered to this screen — the same placement the
+  // generated Lua uses, so the bar and the compositor never disagree.
   //
-  // A monitor in the layout that is unplugged is simply absent here, and the
-  // workspaces the compositor reflowed onto this screen show up through the
-  // live Hyprland state rather than through the config.
+  // A switched-off workspace has no rule and no keybinding, so it cannot be
+  // reached at all; drawing a button for it would offer something that does
+  // not work, so they are filtered out rather than dimmed.
+  //
+  // A monitor that is not plugged in has its workspaces reflow onto the
+  // nearest one that is (nearest in layout order, preferring left), matching
+  // the compositor. Returning null is reserved for "there is no config"; an
+  // empty list means "this screen is not ready or holds nothing", which must
+  // not fall through to the stock 1–10 buttons.
   function assignedIds() {
-    if (!config || !config.monitors) return null
-    var monitors = monitorList()
-    var off = config.disabled || []
-    for (var selector in config.monitors) {
-      if (resolveSelector(selector, monitors) !== root.screenName) continue
-      return (config.monitors[selector] || []).filter(function (id) {
-        return off.indexOf(id) === -1
+    var name = root.screenName
+    var values = root.hyprMonitors
+    if (!root.config || !root.config.monitors) return null
+    if (!name || !values || values.length === 0) return []
+
+    var monitors = root.monitorList()
+    var off = root.config.disabled || []
+    var groups = []
+    for (var selector in root.config.monitors) {
+      groups.push({
+        name: root.resolveSelector(selector, monitors),
+        workspaces: (root.config.monitors[selector] || []).filter(function (id) {
+          return off.indexOf(id) === -1
+        })
       })
     }
-    return null
+
+    var present = []
+    for (var i = 0; i < groups.length; i++) if (groups[i].name) present.push(i)
+    if (present.length === 0) return []
+
+    function nearest(from) {
+      var best = present[0], bestDistance = 1e9
+      for (var p = 0; p < present.length; p++) {
+        var idx = present[p]
+        var distance = Math.abs(idx - from) * 2 + (idx > from ? 1 : 0)
+        if (distance < bestDistance) { best = idx; bestDistance = distance }
+      }
+      return best
+    }
+
+    var mine = []
+    for (var g = 0; g < groups.length; g++) {
+      var target = groups[g].name ? g : nearest(g)
+      if (groups[target].name !== name) continue
+      mine = mine.concat(groups[g].workspaces)
+    }
+    return mine
   }
 
   // ── model ─────────────────────────────────────────────────────────────────
 
   function workspaceById(id) {
-    var values = Hyprland.workspaces ? Hyprland.workspaces.values : []
+    var values = root.hyprWorkspaces
     for (var i = 0; i < values.length; i++) {
       if (values[i].id === id) return values[i]
     }
@@ -128,11 +180,13 @@ BarWidget {
   }
 
   readonly property var ids: {
-    var assigned = assignedIds()
+    var assigned = root.assignedIds()
 
-    // No usable config for this screen: fall back to the stock behaviour rather
-    // than an empty bar, so a broken or missing file is survivable.
-    if (assigned === null) assigned = fallbackIds()
+    // No config at all: fall back to the stock behaviour rather than an empty
+    // bar, so a broken or missing file is survivable. An empty list from
+    // assignedIds is different — it means the config is fine and this screen
+    // just is not ready, or holds nothing — and must not become 1–10.
+    if (assigned === null) assigned = root.fallbackIds()
 
     // Assigned workspaces are persistent, so they exist whether or not
     // anything is in them, and the bar draws all of them. That fixed width is
@@ -143,7 +197,7 @@ BarWidget {
 
   function fallbackIds() {
     var out = [1, 2, 3, 4, 5]
-    var values = Hyprland.workspaces ? Hyprland.workspaces.values : []
+    var values = root.hyprWorkspaces
     for (var i = 0; i < values.length; i++) {
       var id = values[i].id
       if (id > 0 && id <= root.keySlots && out.indexOf(id) === -1) out.push(id)

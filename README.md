@@ -120,6 +120,8 @@ picture matches the desk.
   There is no button for it, because it is not a thing you should need twice.
 - **Identify** puts a big number and connector name on each physical screen for
   three seconds, so you can tell which `DP-` is which without counting cables.
+- Under the desk, **if monitors go missing** lists what each saved fallback
+  would do, so undocking is not the only way to find out.
 - **Hide empty** sets what every bar draws, described under *Widget settings*.
 - Nothing is written until **Apply**; `Esc` or **Cancel** throws the edit away.
 
@@ -271,7 +273,19 @@ It asks Hyprland rather than assuming, and checks: the generated Lua is ours
 and current, the `require` is in place, `SUPER+L` is bound here and points at
 a script that exists, no saved `SUPER+L` override outranks us, every workspace
 is on its home monitor and in the layout the config asks for, and every
-switched-off workspace really is unbound. It exits non-zero on
+switched-off workspace really is unbound.
+
+It also checks **every** saved layout, not just the one in force. A fallback is
+only exercised the day a monitor goes missing, which is the worst moment to
+find out it was wrong all along, so the parts that are wrong on paper are
+reported now: a workspace placed on two monitors at once, a `disabled` or
+`layouts` entry naming a workspace that layout never places, and — the one
+that is genuinely hard to spot by reading — a layout that can never be used
+because an earlier one in the list needs a subset of its monitors, so it always
+matches first.
+
+Those checks need nothing plugged in, so they still run when *no* saved layout
+fits the monitors present. That is the moment they are most worth having. It exits non-zero on
 any drift, so a hook or a keybinding can watch it too.
 
 `apply` runs it before claiming success, and reports what does not match rather
@@ -284,6 +298,7 @@ Config:   /home/you/.config/omarchy/workspaces.json
   ✓ workspaces.lua matches the config
   ✓ SUPER+L points at a script that exists
   ✓ hyprland.lua requires hypr.workspaces
+  ✓ all 4 saved layouts are consistent and reachable
   ✗ saved SUPER+L layout override(s) outrank this plugin: workspace 2 7
   ✓ SUPER+L is bound to this plugin's layout toggle
   ✓ placement: all 10 workspaces on their home monitor
@@ -339,7 +354,9 @@ Anything that needs a live Hyprland is `doctor`'s job instead.
 ```
 
 Profiles are matched **in order**; the first one whose every monitor is
-connected is used. Put your most specific profile first.
+connected is used, so the most specific goes first — put a single-monitor
+fallback ahead of the full desk and the full desk can never win. `doctor`
+checks for exactly that, and the editor lists what each fallback would do.
 
 A monitor key is either a bare output name (`eDP-1`) or `desc:` plus the
 monitor description from `hyprctl monitors`. Prefer `desc:` — output names move.

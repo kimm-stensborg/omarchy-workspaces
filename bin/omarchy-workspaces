@@ -747,13 +747,8 @@ cmd_doctor() {
   ensure_config
   DOCTOR_PROBLEMS=0
   local profile idx
-  profile=$(active_profile) || {
-    echo "✗ no profile matches the connected monitors" >&2
-    echo "  connected: $(monitors_json | jq -r '[.[].name] | join(", ")')" >&2
-    return 1
-  }
-  idx=$(profile_index "$profile")
-  say "Profile:  $profile"
+  profile=$(active_profile || true)
+  say "Profile:  ${profile:-(none — no saved layout fits the monitors that are plugged in)}"
   say "Config:   $CONFIG"
   say ""
 
@@ -792,6 +787,81 @@ cmd_doctor() {
   grep -q 'hypr.workspaces' "$HOME/.config/hypr/hyprland.lua" 2>/dev/null \
     && ok "hyprland.lua requires hypr.workspaces" \
     || bad "hyprland.lua does not require hypr.workspaces — no rule is being applied"
+
+  # ── every profile, not just the one in force ─────────────────────────────
+  #
+  # A fallback profile is only exercised on the day a monitor goes missing,
+  # which is the worst moment to discover it was wrong all along. None of it
+  # can be checked against the compositor — those monitors are not plugged in —
+  # but the parts that are wrong on paper are wrong whatever is connected.
+  local faults
+  faults=$(jq -r '
+    [ .profiles
+      | to_entries[]
+      | .key as $i | .value as $p
+      | ($p.name // ("#" + ($i | tostring))) as $name
+      | ($p.monitors // {}) as $mons
+      | ([$mons[][]] ) as $all
+      | (
+          # A workspace on two monitors at once has no home, which is the one
+          # thing this plugin promises.
+          ( $all | group_by(.) | map(select(length > 1) | .[0]) | sort
+            | if length > 0 then
+                [ $name + ": workspace " + (map(tostring) | join(", ")) + " is on two monitors" ]
+              else [] end )
+          # Switching off, or pinning the layout of, a workspace the profile
+          # never places is a line that will never do anything.
+          + ( (($p.disabled // []) - ($all | unique)) | sort
+              | if length > 0 then
+                  [ $name + ": disabled workspace " + (map(tostring) | join(", ")) + " is not assigned here" ]
+                else [] end )
+          + ( (($p.layouts // {} | keys | map(tonumber)) - ($all | unique)) | sort
+              | if length > 0 then
+                  [ $name + ": layout set for unassigned workspace " + (map(tostring) | join(", ")) ]
+                else [] end )
+          + ( if ($mons | length) == 0 then [ $name + ": places no workspaces at all" ] else [] end )
+        )
+    ] | flatten | .[]' "$CONFIG")
+
+  # Profiles are tried in order and the first whose monitors are all present
+  # wins, so a profile listed after one needing only a subset of its monitors
+  # can never be reached: whenever this one could match, the earlier one
+  # already has. Pairwise, which reads far better here than as more jq.
+  local shadow=() count i j
+  count=$(jq '.profiles | length' "$CONFIG")
+  for ((i = 0; i < count; i++)); do
+    for ((j = 0; j < i; j++)); do
+      if jq -e --argjson a "$j" --argjson b "$i" '
+          (.profiles[$a].monitors // {} | keys) as $earlier
+          | (.profiles[$b].monitors // {} | keys) as $later
+          | ($earlier | length) > 0 and (($earlier - $later) | length) == 0' "$CONFIG" >/dev/null; then
+        shadow+=("$(jq -r --argjson a "$j" --argjson b "$i" \
+          '"\(.profiles[$b].name) can never be used: \(.profiles[$a].name) comes first and needs fewer monitors"' "$CONFIG")")
+        break
+      fi
+    done
+  done
+
+  if [[ -n $faults ]]; then
+    while IFS= read -r line; do [[ -n $line ]] && bad "$line"; done <<<"$faults"
+  fi
+  if ((${#shadow[@]})); then
+    for line in "${shadow[@]}"; do bad "$line"; done
+  fi
+  [[ -z $faults ]] && ((${#shadow[@]} == 0)) &&
+    ok "all $count saved layouts are consistent and reachable"
+
+  # Everything above holds whatever is plugged in. Everything below compares
+  # against a running compositor, which needs a layout that fits the monitors
+  # actually present. Not having one is itself the finding — and it is exactly
+  # when the checks above matter most, which is why they already ran.
+  if [[ -z $profile ]]; then
+    bad "no saved layout fits the connected monitors: $(monitors_json | jq -r '[.[].name] | join(", ")')"
+    say ""
+    echo "$DOCTOR_PROBLEMS problem(s). Run 'omarchy-workspaces apply' to reconcile." >&2
+    return 1
+  fi
+  idx=$(profile_index "$profile")
 
   # ── Omarchy's SUPER+L overrides outrank us, so any survivor is a problem ──
   local stale=() ws

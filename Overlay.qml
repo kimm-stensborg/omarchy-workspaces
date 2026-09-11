@@ -785,6 +785,47 @@ Item {
     onTriggered: root.identifying = false
   }
 
+  // What the desk becomes when monitors go missing. The config holds a list
+  // of layouts and uses the first whose monitors are all plugged in, which is
+  // invisible from a picture of the desk as it is right now — you find out
+  // what undocking does by undocking. These are the other entries in that
+  // list, rendered the same way as the desk so the answer needs no explaining.
+  readonly property var fallbacks: {
+    var out = []
+    if (!root.config || !Array.isArray(root.config.profiles)) return out
+    var live = root.monitorList()
+    for (var p = 0; p < root.config.profiles.length; p++) {
+      var prof = root.config.profiles[p]
+      if (String(prof.name || "") === root.profileName) continue
+      var places = []
+      var mons = prof.monitors || ({})
+      for (var sel in mons) {
+        var ids = (mons[sel] || []).slice().sort(function (a, b) { return a - b })
+        if (ids.length === 0) continue
+        places.push({ name: root.displayName(sel, live), ids: ids })
+      }
+      if (places.length > 0) out.push(places)
+    }
+    return out
+  }
+
+  // A selector names a monitor by description so it survives the output name
+  // changing. That is unreadable, so show the live name when the monitor is
+  // plugged in, and the tail of the description when it is not.
+  function displayName(selector, live) {
+    var resolved = root.resolveSelector(selector, live)
+    if (resolved) return resolved
+    var text = String(selector).indexOf("desc:") === 0 ? String(selector).substring(5) : String(selector)
+    var words = text.split(" ")
+    return words.length > 2 ? words[words.length - 1] : text
+  }
+
+  function idRun(ids) {
+    var out = []
+    for (var i = 0; i < ids.length; i++) out.push(root.keyLabel(ids[i]))
+    return out.join(" ")
+  }
+
   function monitorIndex(name) {
     for (var i = 0; i < root.monitors.length; i++) {
       if (root.monitors[i].name === String(name)) return i + 1
@@ -1219,6 +1260,50 @@ Item {
                   }
                 }
               }
+            }
+          }
+        }
+
+        // ── what unplugging does ────────────────────────────────────────────
+        Column {
+          width: parent.width
+          spacing: Style.spacing.xxs
+          visible: root.fallbacks.length > 0
+
+          Text {
+            text: "If monitors go missing, the first of these that fits is used"
+            color: root.foreground
+            opacity: 0.45
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            textFormat: Text.PlainText
+          }
+
+          Repeater {
+            model: root.fallbacks
+
+            Text {
+              required property var modelData
+              width: parent.width
+              // "DP-7  1 2 3 4…" on its own reads as a statement about the
+              // desk as it is. These are conditionals, so each line says the
+              // condition first.
+              text: {
+                if (modelData.length === 1)
+                  return "Only " + modelData[0].name + "  →  " + root.idRun(modelData[0].ids)
+                var names = [], places = []
+                for (var i = 0; i < modelData.length; i++) {
+                  names.push(modelData[i].name)
+                  places.push(modelData[i].name + " " + root.idRun(modelData[i].ids))
+                }
+                return "Only " + names.join(" + ") + "  →  " + places.join(",  ")
+              }
+              color: root.foreground
+              opacity: 0.6
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              textFormat: Text.PlainText
+              elide: Text.ElideRight
             }
           }
         }

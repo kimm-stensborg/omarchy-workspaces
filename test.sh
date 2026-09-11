@@ -157,6 +157,33 @@ has "the key sweep is named, not a literal" "$(cat "$WORK/ws.lua")" "local key_s
 has "unmanaged key slots are unbound too"   "$(cat "$WORK/ws.lua")" "disabled[ws] or not mine[ws]"
 
 echo
+echo "every saved layout is checked, not just the live one"
+doc() { OMARCHY_WORKSPACES_CONFIG="$WORK/ws.json" bash "$CLI" doctor 2>&1; }
+cat >"$WORK/ws.json" <<'JSON'
+{ "version": 1, "profiles": [ { "name": "desk",
+  "monitors": { "A": [1,2], "B": [2,3] } } ] }
+JSON
+has "a workspace on two monitors"  "$(doc)" "workspace 2 is on two monitors"
+cat >"$WORK/ws.json" <<'JSON'
+{ "version": 1, "profiles": [ { "name": "desk",
+  "monitors": { "A": [1,2] }, "disabled": [7], "layouts": { "9": "scrolling" } } ] }
+JSON
+has "disabled pointing nowhere"    "$(doc)" "disabled workspace 7 is not assigned here"
+has "a layout pointing nowhere"    "$(doc)" "layout set for unassigned workspace 9"
+cat >"$WORK/ws.json" <<'JSON'
+{ "version": 1, "profiles": [
+  { "name": "solo", "monitors": { "A": [1,2,3] } },
+  { "name": "desk", "monitors": { "A": [1], "B": [2,3] } } ] }
+JSON
+has "a fallback that can never win" "$(doc)" "desk can never be used: solo comes first"
+cat >"$WORK/ws.json" <<'JSON'
+{ "version": 1, "profiles": [
+  { "name": "desk", "monitors": { "A": [1], "B": [2,3] } },
+  { "name": "solo", "monitors": { "A": [1,2,3] } } ] }
+JSON
+hasnt "the same pair in the right order" "$(doc)" "can never be used"
+
+echo
 echo "config guards"
 printf 'not json' >"$WORK/ws.json"
 has "a corrupt config is refused" "$(run list)" "not a version 1 config"

@@ -1,8 +1,7 @@
 # Workspaces per Monitor
 
-Pin Hyprland workspaces to specific monitors, make each monitor's bar show
-only the workspaces that monitor owns, and rearrange the monitors themselves by
-dragging them.
+Pin Hyprland workspaces to specific monitors, and make each monitor's bar show
+only the workspaces that monitor owns.
 
 Out of the box, Omarchy lets workspaces land wherever they were first opened,
 and the bar renders the same list of numbers on every screen. On a multi-monitor
@@ -30,7 +29,6 @@ All ship with Omarchy and are present on a stock install:
 |---------|----------|
 | `hyprland` | `hyprctl` — reading monitors, reloading, moving workspaces |
 | `jq` | every config read and write in `bin/omarchy-workspaces` |
-| `awk` | rewriting monitor positions in `monitors.lua` (`arrange`) |
 | `diffutils` | `doctor`, to tell a stale generated file from a current one |
 
 Nothing is downloaded or installed at runtime.
@@ -97,8 +95,8 @@ picture matches the desk.
 ```
 ┌───────────────────────────────────────────────────────────────┐
 │  Workspaces                                      [✓ Hide empty]│
-│  Drag a workspace to another monitor, or a monitor to           │
-│  rearrange the desk. Click a workspace to switch it off.        │
+│  Drag a workspace to another monitor.                           │
+│  Click a workspace to switch it off.                            │
 │                                                                │
 │  ┌── DP-7 ────────[1]┐┌── DP-5 ────────[2]┐┌ eDP-1 ───[3]┐   │
 │  │ 2560 x 1440        ││ 2560 x 1440        ││ 1920 x 1200 │   │
@@ -114,7 +112,6 @@ picture matches the desk.
 - **Drag** a workspace chip from one monitor to another.
 - **Click** a chip to switch that workspace off — or press its number key.
   `0` is workspace 10.
-- **Drag a monitor** to move it on the desk — see below.
 - Workspaces are spread evenly across your monitors when the config is first
   built, and again if the editor ever opens on a layout that assigns nothing.
   There is no button for it, because it is not a thing you should need twice.
@@ -129,44 +126,19 @@ Every workspace always belongs to exactly one monitor. There is no third state
 where Hyprland places a workspace itself — a workspace with no home is the
 thing this plugin exists to prevent.
 
-### Rearranging the desk
+### Monitor positions are read, never written
 
-The monitors are draggable too. Grab one anywhere that is not a workspace chip
-and carry it along the row: the other monitors step aside to open a slot for
-it, and a ghost outline marks the slot it would land in. It is the same gesture
-as dragging a tab along a tab bar — what you are looking at mid-drag is the
-arrangement you get by letting go.
+The desk is drawn from where Hyprland says the monitors are. Moving them is
+`~/.config/hypr/monitors.lua`, and this plugin does not touch that file.
 
-Which slot you are in is decided by where the dragged monitor's centre sits
-among the others, measured against the row packed without it, so the slot
-changes the moment you carry it past a neighbour rather than only once you have
-covered that neighbour completely. Pushing it against either end of the desk
-puts it at that end of the row, which is how a monitor wider than its
-neighbour still gets to lead.
-
-Monitors of different widths change places by repacking the row, not by
-swapping coordinates, so a rearrangement can never open a gap or leave an
-overlap.
-
-A drag stays inside the desk. The picture is a picture of the desk, and a
-screen dragged out of it would be drawn over everything else in the card, so
-the extent it had when you grabbed it is also the fence around it. What that
-means in practice is that a drag rearranges the envelope the desk already has:
-a row reorders within the row, and carrying a monitor clear of the row to stack
-it above or below another is a move for a desk that already has the height for
-it — there, the drag falls back to free placement, snapping flush and level to
-whatever edge it lands near.
-
-The desk is always shifted back so its top-left corner is `0x0`. With a single
-monitor there is no arrangement to change, so monitors are not draggable at
-all — no grab cursor, nothing to drop.
-
-Apply writes the result into **`~/.config/hypr/monitors.lua`** — your file, not
-a generated one. Only the `position = "XxY"` string of each monitor is
-rewritten; modes, scales, comments and everything else are left exactly as they
-were, and a monitor with no block of its own gets one appended. The first time
-the plugin touches that file it keeps a pristine copy at `monitors.lua.bak` and
-never overwrites it again.
+It used to: monitors were draggable and Apply rewrote the `position` of each.
+It could not be made safe. A `monitors.lua` that names outputs through a local
+table — `hl.monitor({ output = monitors.left, ... })`, which is the shape
+Omarchy's own comments suggest — has nothing for a text rewriter to match, so
+the fallback appended fresh blocks at the end of the file. Where that file
+ends in `return monitors`, as it does when the table is shared with another
+config, appending produced Lua that would not parse at all. Breaking someone's
+monitor configuration is a steep price for saving them a text edit.
 
 Add a menu entry by putting this in
 `~/.config/omarchy/extensions/omarchy-menu.jsonc` (it hot-reloads on save),
@@ -247,7 +219,6 @@ omarchy-workspaces apply               # regenerate rules, reload, re-home
 omarchy-workspaces bootstrap           # what the service runs; safe any time
 omarchy-workspaces disable 4,10        # switch workspaces off entirely
 omarchy-workspaces enable 4            # and back on
-omarchy-workspaces arrange DP-5 0x0 DP-7 2560x0   # move monitors on the desk
 omarchy-workspaces generate            # write the rules without reloading
 omarchy-workspaces edit                # open the config in $EDITOR
 omarchy-workspaces open                # the visual editor
@@ -313,7 +284,6 @@ Anything that needs a live Hyprland is `doctor`'s job instead.
 | `~/.config/omarchy/workspaces.json` | you | The source of truth. Read by the Lua generator, the bar widget, and the editor. |
 | `~/.config/hypr/workspaces.lua` | generated | Workspace rules. **Do not edit** — every apply overwrites it. |
 | `~/.config/hypr/hyprland.lua` | you | Gets one guarded `require` line appended once. |
-| `~/.config/hypr/monitors.lua` | you | Only the `position` of each monitor is rewritten, and only when you rearrange the desk. A pristine copy is kept at `monitors.lua.bak` the first time. |
 | `~/.config/omarchy/shell.json` | the shell | Holds the widget's `hideEmpty` setting, inline on its bar entry. |
 
 ### Config shape
@@ -439,8 +409,6 @@ put outside its own folder are yours to clean up:
 ```bash
 rm ~/.config/hypr/workspaces.lua
 rm ~/.config/omarchy/workspaces.json
-# if you rearranged monitors and want the original arrangement back:
-# mv ~/.config/hypr/monitors.lua.bak ~/.config/hypr/monitors.lua
 rm -f ~/.local/bin/omarchy-workspaces        # only if you linked it
 # then drop the `require(...).module("hypr.workspaces")` line from
 # ~/.config/hypr/hyprland.lua and reload: hyprctl reload

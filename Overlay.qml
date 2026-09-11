@@ -10,10 +10,11 @@ import qs.Ui
 //
 // Monitors are drawn to scale in their real desktop arrangement, so the picture
 // on screen matches the one on the desk. Every workspace lives on exactly one
-// monitor: drag a chip to move it to another, click it to switch it off. The
-// monitors themselves are draggable too — moving one rearranges the desk,
-// which is a rewrite of the positions in ~/.config/hypr/monitors.lua rather
-// than of this plugin's config.
+// monitor: drag a chip to move it to another, click it to switch it off.
+//
+// Where the monitors themselves sit is read, never written. That belongs to
+// ~/.config/hypr/monitors.lua, and an editor that rewrites someone's hand-made
+// Lua is a worse idea than it sounds — see the note in the README.
 //
 // A workspace that is off keeps its place in the picture but gets no rule and
 // no keybinding, so it cannot be reached or created at all. That is the whole
@@ -238,15 +239,6 @@ Item {
     root.initialGeometry = root.cloneGeometry(geo)
   }
 
-  function geometryMoved() {
-    for (var name in root.geometry) {
-      var before = root.initialGeometry[name]
-      if (!before) return true
-      if (Math.round(before.x) !== Math.round(root.geometry[name].x)) return true
-      if (Math.round(before.y) !== Math.round(root.geometry[name].y)) return true
-    }
-    return false
-  }
 
   function resolveSelector(selector, candidates) {
     if (selector.indexOf("desc:") === 0) {
@@ -414,18 +406,6 @@ Item {
     var run = "bash " + Util.shellQuote(root.cli) + " "
     var command = ""
 
-    // The desk arrangement first: moving a monitor changes where the rules it
-    // owns will put their workspaces, so the positions have to be on disk
-    // before `apply` reloads Hyprland and walks the workspaces home.
-    if (root.geometryMoved()) {
-      var positions = ({})
-      for (var screen in root.geometry) {
-        positions[screen] = Math.round(root.geometry[screen].x)
-          + "x" + Math.round(root.geometry[screen].y)
-      }
-      command += run + "arrange --base64 " + Qt.btoa(JSON.stringify(positions)) + " --quiet && "
-    }
-
     command += run + "set-layout --base64 "
       + Qt.btoa(JSON.stringify(payload))
       + " --disabled-base64 " + Qt.btoa(JSON.stringify(root.disabled)) + " --quiet"
@@ -445,13 +425,7 @@ Item {
 
   // ── stage geometry ────────────────────────────────────────────────────────
 
-  // Frozen for the length of a monitor drag: recomputing the extent from a
-  // monitor that is moving would rescale the whole desk under the pointer on
-  // every frame.
-  property var frozenBounds: null
-
   readonly property var deskBounds: {
-    if (root.frozenBounds) return root.frozenBounds
     var list = root.monitors
     if (list.length === 0) return { left: 0, top: 0, width: 1, height: 1 }
     var left = list[0].x, top = list[0].y
@@ -473,290 +447,6 @@ Item {
 
   // ── rearranging the desk ──────────────────────────────────────────────────
 
-  property bool monitorDragging: false
-  property string monitorDragName: ""
-  // Where everything would end up if the drag were let go right now, recomputed
-  // on every move and drawn as ghosts behind the monitors. Empty when nothing
-  // is being dragged.
-  property var preview: ({})
-  property real monitorOriginX: 0
-  property real monitorOriginY: 0
-  property real monitorGrabX: 0
-  property real monitorGrabY: 0
-  // The slot the dragged monitor currently occupies in its row.
-  property int rowCursor: 0
-
-  function beginMonitorDrag(name, globalX, globalY) {
-    var geo = root.geometry[name]
-    if (!geo || root.monitors.length < 2) return
-    root.monitorDragName = name
-    root.monitorOriginX = geo.x
-    root.monitorOriginY = geo.y
-    root.monitorGrabX = globalX
-    root.monitorGrabY = globalY
-
-    var others = root.rowMembers(root.geometry, name, geo.y)
-    var slot = 0
-    for (var i = 0; i < others.length; i++) if (root.geometry[others[i]].x < geo.x) slot++
-    root.rowCursor = slot
-    // Exactly the extent as it stands, slack included nowhere: the stage keeps
-    // the scale and origin it had when the drag started, so the picture holds
-    // still under the hand. A monitor dragged past the edge of the desk simply
-    // draws outside the stage until it is dropped and everything re-fits.
-    root.frozenBounds = {
-      left: root.deskLeft, top: root.deskTop,
-      width: root.deskWidth, height: root.deskHeight
-    }
-    root.monitorDragging = true
-  }
-
-  function updateMonitorDrag(globalX, globalY) {
-    if (!root.monitorDragging) return
-    var scale = stage.scaleFactor > 0 ? stage.scaleFactor : 1
-    var next = root.cloneGeometry(root.geometry)
-    var moving = next[root.monitorDragName]
-    if (!moving) return
-    moving.x = root.monitorOriginX + (globalX - root.monitorGrabX) / scale
-    moving.y = root.monitorOriginY + (globalY - root.monitorGrabY) / scale
-    root.clampToDesk(moving)
-    root.geometry = next
-    root.preview = root.settled(root.monitorDragName, root.monitorOriginX, root.monitorOriginY)
-  }
-
-  // A monitor being dragged stays inside the desk it belongs to. The picture is
-  // a picture of the desk, and a screen dragged out of it would be drawn over
-  // the buttons and off the edge of the card — so the extent
-  // frozen at the start of the drag is also the fence around it. It does mean
-  // a drag can only rearrange the envelope the desk already has: a row of
-  // monitors reorders within the row, and stacking one above another is a
-  // change for a desk that already has the height for it.
-  function clampToDesk(spot) {
-    var bounds = root.frozenBounds
-    if (!bounds) return
-    spot.x = Math.max(bounds.left, Math.min(bounds.left + bounds.width - spot.width, spot.x))
-    spot.y = Math.max(bounds.top, Math.min(bounds.top + bounds.height - spot.height, spot.y))
-  }
-
-  function endMonitorDrag() {
-    if (!root.monitorDragging) return
-    root.settle(root.monitorDragName, root.monitorOriginX, root.monitorOriginY)
-    root.preview = ({})
-    root.monitorDragging = false
-    root.monitorDragName = ""
-    root.frozenBounds = null
-    if (root.geometryMoved()) root.dirty = true
-  }
-
-  function cancelMonitorDrag() {
-    if (!root.monitorDragging) return
-    var next = root.cloneGeometry(root.geometry)
-    if (next[root.monitorDragName]) {
-      next[root.monitorDragName].x = root.monitorOriginX
-      next[root.monitorDragName].y = root.monitorOriginY
-    }
-    root.geometry = next
-    root.preview = ({})
-    root.monitorDragging = false
-    root.monitorDragName = ""
-    root.frozenBounds = null
-  }
-
-  // Where the dragged monitor sits in the row right now, and therefore where a
-  // drop would put it. This is the whole gesture: carry a screen along the row
-  // and the others step aside to open a slot for it, exactly as dragging a tab
-  // along a tab bar works.
-  //
-  // Answering it is also what the preview draws, so it has to be askable
-  // without committing: this works on a copy and hands the copy back, still in
-  // the coordinate frame it was given. Shifting the desk back to 0x0 belongs to
-  // the drop, not to the question — a preview that renormalised would slide out
-  // of line with the monitors that are not moving.
-  function settled(name, originX, originY) {
-    var next = root.cloneGeometry(root.geometry)
-    var moving = next[name]
-    if (!moving) return next
-
-    var others = root.rowMembers(next, name, originY)
-    if (others.length > 0) {
-      var rowLeft = originX
-      var rowRight = originX + moving.width
-      var bandTop = next[others[0]].y
-      var bandBottom = bandTop + next[others[0]].height
-      for (var i = 0; i < others.length; i++) {
-        var edge = next[others[i]]
-        rowLeft = Math.min(rowLeft, edge.x)
-        rowRight = Math.max(rowRight, edge.x + edge.width)
-        bandTop = Math.min(bandTop, edge.y)
-        bandBottom = Math.max(bandBottom, edge.y + edge.height)
-      }
-
-      // Still level with the row makes it a reorder. Carried clear of the row
-      // altogether — only possible on a desk that already has the height for a
-      // second row — falls through to free placement below.
-      var centreY = moving.y + moving.height / 2
-      if (centreY > bandTop && centreY < bandBottom) {
-        root.rowCursor = root.rowSlot(next, name, others, rowLeft, rowRight, root.rowCursor)
-        root.packRow(next, name, others, root.rowCursor, rowLeft, originY)
-        return next
-      }
-    }
-
-    // A fixed number of pixels on screen, so the pull feels the same on a
-    // two-monitor desk and on a five-monitor one.
-    var scale = stage.scaleFactor > 0 ? stage.scaleFactor : 1
-    var reachX = Style.space(28) / scale
-    var reachY = reachX
-    var snapX = null, snapY = null
-
-    // Each axis is considered on its own, against both ways of lining up with
-    // a neighbour: flush against its edge, or aligned with it.
-    for (var other in next) {
-      if (other === name) continue
-      var neighbour = next[other]
-      var xs = [neighbour.x + neighbour.width, neighbour.x - moving.width,
-                neighbour.x, neighbour.x + neighbour.width - moving.width]
-      for (var x = 0; x < xs.length; x++) {
-        if (Math.abs(moving.x - xs[x]) <= reachX) { reachX = Math.abs(moving.x - xs[x]); snapX = xs[x] }
-      }
-      var ys = [neighbour.y + neighbour.height, neighbour.y - moving.height,
-                neighbour.y, neighbour.y + neighbour.height - moving.height]
-      for (var y = 0; y < ys.length; y++) {
-        if (Math.abs(moving.y - ys[y]) <= reachY) { reachY = Math.abs(moving.y - ys[y]); snapY = ys[y] }
-      }
-    }
-    if (snapX !== null) moving.x = snapX
-    if (snapY !== null) moving.y = snapY
-
-    root.separate(next, name)
-    return next
-  }
-
-  function settle(name, originX, originY) {
-    var next = root.settled(name, originX, originY)
-    root.normalize(next)
-    root.roundGeometry(next)
-    root.geometry = next
-  }
-
-  // Monitor positions are whole pixels; keeping them so is what makes a drag
-  // that changed nothing come out byte-identical in monitors.lua.
-  function roundGeometry(geo) {
-    for (var name in geo) {
-      geo[name].x = Math.round(geo[name].x)
-      geo[name].y = Math.round(geo[name].y)
-    }
-  }
-
-  // The monitors level with the dragged one, in their committed left-to-right
-  // order. Nothing here moves during a drag — only the dragged monitor does —
-  // so this is the same list, in the same order, for the whole gesture.
-  function rowMembers(geo, name, originY) {
-    var moving = geo[name]
-    var out = []
-    for (var other in geo) {
-      if (other === name) continue
-      var edge = geo[other]
-      if (edge.y < originY + moving.height && originY < edge.y + edge.height) out.push(other)
-    }
-    out.sort(function (left, right) { return geo[left].x - geo[right].x })
-    return out
-  }
-
-  // Which slot of the row the dragged monitor has reached, measured in one
-  // frame of reference only: the row packed *without* it. Each other monitor's
-  // centre in that packing is a boundary, and the slot is however many
-  // boundaries the dragged centre has passed. Being a function of position
-  // alone, it cannot oscillate the way a rule comparing against the moving
-  // picture can; the only state is a dead-band that stops a boundary from
-  // flickering while you hover exactly on it.
-  function rowSlot(geo, name, others, rowLeft, rowRight, current) {
-    var moving = geo[name]
-    var band = moving.width * 0.06
-
-    // Shoved against either end of the desk means that end of the row, whatever
-    // the arithmetic says: a monitor wider than its neighbour can never get its
-    // centre past the first boundary, and would otherwise be unable to lead.
-    if (moving.x <= rowLeft + band) return 0
-    if (moving.x + moving.width >= rowRight - band) return others.length
-
-    var centre = moving.x + moving.width / 2
-    var index = 0
-    var cursor = rowLeft
-    for (var i = 0; i < others.length; i++) {
-      var boundary = cursor + geo[others[i]].width / 2
-      if (centre <= boundary + (i >= current ? band : -band)) break
-      cursor += geo[others[i]].width
-      index++
-    }
-    return index
-  }
-
-  // Lay the row back out flush with the dragged monitor in the given slot.
-  // Packing rather than swapping is what keeps the desk gap-free when monitors
-  // of different widths change places.
-  function packRow(geo, name, others, index, rowLeft, originY) {
-    var order = others.slice()
-    order.splice(index, 0, name)
-    geo[name].y = originY
-    var cursor = rowLeft
-    for (var i = 0; i < order.length; i++) {
-      geo[order[i]].x = cursor
-      cursor += geo[order[i]].width
-    }
-  }
-
-  // Two monitors cannot share a pixel. Whatever the snap produced, push the
-  // dropped one out of anything it landed inside along the axis it is least
-  // deep into — the direction it looks like it came from. Dropping a monitor
-  // squarely on top of another is how you swap two: the snap lines them up,
-  // and this slides the newcomer out to the nearer side.
-  function separate(geo, name) {
-    var moving = geo[name]
-    for (var guard = 0; guard < 16; guard++) {
-      var hit = null
-      for (var other in geo) {
-        if (other === name) continue
-        var edge = geo[other]
-        if (moving.x < edge.x + edge.width && edge.x < moving.x + moving.width
-            && moving.y < edge.y + edge.height && edge.y < moving.y + moving.height) {
-          hit = edge
-          break
-        }
-      }
-      if (!hit) return
-      var right = hit.x + hit.width - moving.x
-      var left = moving.x + moving.width - hit.x
-      var down = hit.y + hit.height - moving.y
-      var up = moving.y + moving.height - hit.y
-      var least = Math.min(right, left, down, up)
-      if (least === right) moving.x += right
-      else if (least === left) moving.x -= left
-      else if (least === down) moving.y += down
-      else moving.y -= up
-    }
-  }
-
-  // Hyprland is perfectly happy with negative coordinates, but a desk that
-  // always starts at 0x0 keeps monitors.lua diffs readable and stops two
-  // arrangements that differ only by an offset from looking different.
-  function normalize(geo) {
-    var minX = null, minY = null
-    for (var name in geo) {
-      minX = minX === null ? geo[name].x : Math.min(minX, geo[name].x)
-      minY = minY === null ? geo[name].y : Math.min(minY, geo[name].y)
-    }
-    if (minX === null) return
-    for (var key in geo) {
-      geo[key].x -= minX
-      geo[key].y -= minY
-    }
-  }
-
-  // ── drag state ────────────────────────────────────────────────────────────
-  //
-  // Chips are never reparented while dragging. A ghost follows the cursor and
-  // the drop target is hit-tested on release, which keeps the Flow layouts
-  // still and makes "what is under the pointer" one obvious calculation.
 
   // Which screen is which. The editor names monitors the way Hyprland does
   // (DP-5, DP-7), and those names carry no hint about where the panel actually
@@ -988,7 +678,7 @@ Item {
             Text {
               width: parent.width
               text: root.monitors.length > 1
-                ? "Drag a workspace to another monitor, or a monitor to rearrange the desk. Click a workspace to switch it off."
+                ? "Drag a workspace to another monitor. Click one to switch it off."
                 : "One monitor, so everything lives here. Click a workspace to switch it off."
               color: root.foreground
               opacity: 0.6
@@ -1062,36 +752,6 @@ Item {
           readonly property real offsetX: (width - root.deskWidth * scaleFactor) / 2
           readonly property real offsetY: (height - root.deskHeight * scaleFactor) / 2
 
-          // The drop preview: an outline in the slot the dragged monitor would
-          // land in. The monitors it displaces do not need one — they move out
-          // of its way for real while the drag is in flight.
-          Rectangle {
-            readonly property var spot: root.monitorDragging
-              ? root.preview[root.monitorDragName] : undefined
-
-            visible: spot !== undefined
-            z: -1
-            x: stage.offsetX + ((spot ? spot.x : 0) - root.deskLeft) * stage.scaleFactor
-            y: stage.offsetY + ((spot ? spot.y : 0) - root.deskTop) * stage.scaleFactor
-            width: Math.max(Style.space(96), (spot ? spot.width : 0) * stage.scaleFactor)
-            height: Math.max(Style.space(84), (spot ? spot.height : 0) * stage.scaleFactor)
-
-            radius: Style.cornerRadius
-            color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.12)
-            border.width: 2
-            border.color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.6)
-
-            Text {
-              anchors.centerIn: parent
-              text: root.monitorDragName
-              color: root.accent
-              opacity: 0.7
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              textFormat: Text.PlainText
-            }
-          }
-
           Repeater {
             id: screens
             model: root.stageMonitors
@@ -1102,43 +762,18 @@ Item {
 
               readonly property string monitorName: modelData.name
               readonly property var geo: root.geometry[monitorName]
-              readonly property bool lifted: root.monitorDragging
-                && root.monitorDragName === monitorName
               readonly property bool targeted: root.dragging && root.hoverValid
                 && root.hoverTarget === monitorName
 
-              // Size comes from the monitor — dragging moves a screen, it never
-              // resizes one. Position comes from the arrangement, except that a
-              // monitor the drag would displace slides to where the drop would
-              // put it while the drag is still in flight: the row opens up as
-              // you carry a screen across it, rather than everything sitting
-              // still under the one you are holding.
-              readonly property var spot: root.monitorDragging && !lifted && root.preview[monitorName]
-                ? root.preview[monitorName]
-                : geo
-
-              z: lifted ? 10 : 0
-              opacity: lifted ? 0.85 : 1
-              x: stage.offsetX + ((spot ? spot.x : 0) - root.deskLeft) * stage.scaleFactor
-              y: stage.offsetY + ((spot ? spot.y : 0) - root.deskTop) * stage.scaleFactor
-
-              // The one in hand tracks the pointer exactly; the ones getting
-              // out of its way glide.
-              Behavior on x {
-                enabled: !screenCard.lifted
-                NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
-              }
-              Behavior on y {
-                enabled: !screenCard.lifted
-                NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
-              }
+              x: stage.offsetX + ((geo ? geo.x : 0) - root.deskLeft) * stage.scaleFactor
+              y: stage.offsetY + ((geo ? geo.y : 0) - root.deskTop) * stage.scaleFactor
               width: Math.max(Style.space(96), modelData.width * stage.scaleFactor)
               height: Math.max(Style.space(84), modelData.height * stage.scaleFactor)
 
               radius: Style.cornerRadius
               color: targeted ? Style.selectedFill : Style.normalFill
-              border.width: targeted || lifted ? 2 : 1
-              border.color: targeted || lifted ? root.accent : root.hairline
+              border.width: targeted ? 2 : 1
+              border.color: targeted ? root.accent : root.hairline
 
               // The number Identify puts on the glass, so the two pictures can
               // be matched up. Pointless with one screen — there is nothing to
@@ -1165,42 +800,6 @@ Item {
                   font.pixelSize: Style.font.caption
                   textFormat: Text.PlainText
                 }
-              }
-
-              // Dragging the monitor itself rearranges the desk. Declared
-              // before the contents, so the chips drawn above it get their own
-              // presses first and this only ever sees one aimed at bare
-              // monitor.
-              MouseArea {
-                anchors.fill: parent
-                enabled: root.monitors.length > 1
-                preventStealing: true
-                cursorShape: screenCard.lifted ? Qt.ClosedHandCursor : Qt.OpenHandCursor
-
-                property real pressX: 0
-                property real pressY: 0
-                property bool moved: false
-
-                onPressed: function (mouse) {
-                  pressX = mouse.x
-                  pressY = mouse.y
-                  moved = false
-                }
-
-                onPositionChanged: function (mouse) {
-                  var point = mapToGlobal(mouse.x, mouse.y)
-                  // The same few pixels of slop the chips use, so a stray
-                  // twitch on a monitor is not a rearrangement.
-                  if (!moved) {
-                    if (Math.abs(mouse.x - pressX) < 4 && Math.abs(mouse.y - pressY) < 4) return
-                    moved = true
-                    root.beginMonitorDrag(screenCard.monitorName, point.x, point.y)
-                  }
-                  root.updateMonitorDrag(point.x, point.y)
-                }
-
-                onReleased: if (moved) root.endMonitorDrag()
-                onCanceled: root.cancelMonitorDrag()
               }
 
               Column {

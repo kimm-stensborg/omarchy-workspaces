@@ -74,8 +74,6 @@ Item {
   // each monitor in ~/.config/hypr/monitors.lua.
   property var geometry: ({})
   property var initialGeometry: ({})
-  property bool hideEmpty: false
-  property bool initialHideEmpty: false
   property bool dirty: false
 
   property color background: Color.menu.background
@@ -140,13 +138,6 @@ Item {
       root.reloadFromDisk()
       root.spreadIfUnassigned()
     }
-  }
-
-  // Same story for shell.json, which decides where the mode toggle starts.
-  onShellConfigChanged: {
-    if (!root.opened || root.dirty) return
-    root.hideEmpty = root.currentHideEmpty()
-    root.initialHideEmpty = root.hideEmpty
   }
 
   function parseConfig(content) {
@@ -298,41 +289,7 @@ Item {
     // rebuild that picture. Dropping them stacks every card at the origin.
     root.seedGeometry()
     root.syncStageMonitors()
-    root.hideEmpty = root.currentHideEmpty()
-    root.initialHideEmpty = root.hideEmpty
     root.dirty = false
-  }
-
-  // The widget's own inline setting, read straight off shell.json. The host
-  // hands plugins a bar-config snapshot too, but reading the file keeps the
-  // toggle honest regardless of what that snapshot chooses to expose.
-  property var shellConfig: null
-
-  FileView {
-    path: Quickshell.env("HOME") + "/.config/omarchy/shell.json"
-    watchChanges: true
-    printErrors: false
-    onFileChanged: reload()
-    onLoaded: {
-      try { root.shellConfig = JSON.parse(String(text() || "")) }
-      catch (error) { root.shellConfig = null }
-    }
-    onLoadFailed: root.shellConfig = null
-  }
-
-  function currentHideEmpty() {
-    var bar = root.shellConfig ? root.shellConfig.bar : null
-    var layout = bar && bar.layout ? bar.layout : null
-    if (!layout) return false
-    var sections = ["left", "center", "right"]
-    for (var s = 0; s < sections.length; s++) {
-      var entries = layout[sections[s]] || []
-      for (var i = 0; i < entries.length; i++) {
-        if (entries[i] && entries[i].id === root.pluginId)
-          return entries[i].hideEmpty === true
-      }
-    }
-    return false
   }
 
   // ── editing ───────────────────────────────────────────────────────────────
@@ -409,13 +366,6 @@ Item {
     command += run + "set-layout --base64 "
       + Qt.btoa(JSON.stringify(payload))
       + " --disabled-base64 " + Qt.btoa(JSON.stringify(root.disabled)) + " --quiet"
-    // `hideEmpty` lives on this widget's entry in shell.json, which belongs to
-    // the shell, not to this plugin. `omarchy bar set` is the supported way in;
-    // hand-editing that file from here was one more owner of somebody else's
-    // state, which is the thing that has bitten this plugin every time.
-    if (root.hideEmpty !== root.initialHideEmpty)
-      command += " && omarchy bar set " + Util.shellQuote(root.pluginId)
-        + " hideEmpty " + (root.hideEmpty ? "true" : "false") + " --json"
     command += " && " + run + "apply --quiet"
 
     Quickshell.execDetached(["bash", "-c", command])
@@ -634,10 +584,6 @@ Item {
           } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
             if (root.dirty) root.apply()
             event.accepted = true
-          } else if (event.text === "h" || event.text === "H") {
-            root.hideEmpty = !root.hideEmpty
-            root.dirty = true
-            event.accepted = true
           } else if (event.text >= "0" && event.text <= "9" && event.text.length === 1) {
             root.toggleWorkspace(event.text === "0" ? 10 : parseInt(event.text))
             event.accepted = true
@@ -656,85 +602,28 @@ Item {
         spacing: Style.spacing.panelGap
 
         // ── header ──────────────────────────────────────────────────────────
-        Item {
+        Column {
           width: parent.width
-          height: Math.max(titles.implicitHeight, modeToggle.height)
+          spacing: Style.spacing.labelGap
 
-          Column {
-            id: titles
-            anchors.left: parent.left
-            anchors.right: modeToggle.left
-            anchors.rightMargin: Style.spacing.panelGap
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.spacing.labelGap
-
-            Text {
-              text: "Workspaces"
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.heading
-              textFormat: Text.PlainText
-            }
-            Text {
-              width: parent.width
-              text: root.monitors.length > 1
-                ? "Drag a workspace to another monitor. Click one to switch it off."
-                : "One monitor, so everything lives here. Click a workspace to switch it off."
-              color: root.foreground
-              opacity: 0.6
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              textFormat: Text.PlainText
-              elide: Text.ElideRight
-            }
+          Text {
+            text: "Workspaces"
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.heading
+            textFormat: Text.PlainText
           }
-
-          // Each bar always draws its own monitor's workspaces. This decides
-          // whether it draws all of them or only the ones in use.
-          Rectangle {
-            id: modeToggle
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            width: toggleRow.implicitWidth + Style.spacing.controlPaddingX * 2
-            height: Style.spacing.controlHeight
-            radius: Style.cornerRadius
-            color: root.hideEmpty ? Style.selectedFill
-              : (toggleHover.hovered ? Style.hoverFill : "transparent")
-            border.width: 1
-            border.color: root.hideEmpty ? root.accent : root.hairline
-
-            Row {
-              id: toggleRow
-              anchors.centerIn: parent
-              spacing: Style.spacing.sm
-
-              Text {
-                anchors.verticalCenter: parent.verticalCenter
-                text: root.hideEmpty ? "\u2713" : "\u00b7"
-                color: root.hideEmpty ? root.accent : root.foreground
-                opacity: root.hideEmpty ? 1 : 0.45
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                textFormat: Text.PlainText
-              }
-              Text {
-                anchors.verticalCenter: parent.verticalCenter
-                text: "Hide empty"
-                color: root.hideEmpty ? root.accent : root.foreground
-                opacity: root.hideEmpty ? 1 : 0.7
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                textFormat: Text.PlainText
-              }
-            }
-
-            HoverHandler { id: toggleHover; cursorShape: Qt.PointingHandCursor }
-            TapHandler {
-              onTapped: {
-                root.hideEmpty = !root.hideEmpty
-                root.dirty = true
-              }
-            }
+          Text {
+            width: parent.width
+            text: root.monitors.length > 1
+              ? "Drag a workspace to another monitor. Click one to switch it off."
+              : "One monitor, so everything lives here. Click a workspace to switch it off."
+            color: root.foreground
+            opacity: 0.6
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            textFormat: Text.PlainText
+            elide: Text.ElideRight
           }
         }
 

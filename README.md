@@ -94,7 +94,7 @@ picture matches the desk.
 
 ```
 ┌───────────────────────────────────────────────────────────────┐
-│  Workspaces                                      [✓ Hide empty]│
+│  Workspaces                                                    │
 │  Drag a workspace to another monitor.                           │
 │  Click a workspace to switch it off.                            │
 │                                                                │
@@ -119,7 +119,6 @@ picture matches the desk.
   three seconds, so you can tell which `DP-` is which without counting cables.
   The same number sits in the corner of each card here, which is what makes the
   two pictures line up. It is hidden when there is only one screen.
-- **Hide empty** sets what every bar draws, described under *Widget settings*.
 - Nothing is written until **Apply**; `Esc` or **Cancel** throws the edit away.
 
 Every workspace always belongs to exactly one monitor. There is no third state
@@ -185,7 +184,8 @@ key, and the settle pass then removes only the ones still switched off.
   desk; the new positions go into `monitors.lua`, one `position` string at a
   time.
 - **Keeps them visible.** Assigned workspaces are persistent, so they exist and
-  show in the bar even when empty. Nothing appears or disappears as you work.
+  show in the bar even when empty. That fixed width is the point: nothing
+  appears or moves under the pointer as you work.
 - **Filters the bar per monitor.** The bar widget knows which screen it is
   drawn on and renders only that screen's workspaces.
 - **Survives identical displays.** Monitors are matched by description, which
@@ -284,7 +284,6 @@ Anything that needs a live Hyprland is `doctor`'s job instead.
 | `~/.config/omarchy/workspaces.json` | you | The source of truth. Read by the Lua generator, the bar widget, and the editor. |
 | `~/.config/hypr/workspaces.lua` | generated | Workspace rules. **Do not edit** — every apply overwrites it. |
 | `~/.config/hypr/hyprland.lua` | you | Gets one guarded `require` line appended once. |
-| `~/.config/omarchy/shell.json` | the shell | Holds the widget's `hideEmpty` setting, inline on its bar entry. |
 
 ### Config shape
 
@@ -319,21 +318,6 @@ omarchy-workspaces detect --force --count=6
 
 `disabled` is optional and lists the workspaces that are switched off. They
 stay in `monitors` — off is a state, not a removal.
-
-## Widget settings
-
-Set these inline on the widget's entry in `~/.config/omarchy/shell.json`:
-
-| Key | Default | Meaning |
-|---|---|---|
-| `hideEmpty` | `false` | Draw only the workspaces that hold windows, instead of every workspace assigned to this monitor. The focused workspace is always drawn, however empty. |
-
-That entry belongs to the shell, not to this plugin, so it is set the supported
-way — `omarchy bar set io.github.kimm-stensborg.workspaces hideEmpty true`, which
-is also what the editor's **Hide empty** toggle calls.
-
-Switched-off workspaces are never drawn, whatever `hideEmpty` says — a button
-for a workspace with no keybinding would offer something that does not work.
 
 ## Tiling layout is not this plugin's job
 

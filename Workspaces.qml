@@ -23,13 +23,6 @@ BarWidget {
   // can reach, and why `0` labels workspace 10.
   readonly property int keySlots: 10
 
-  // Assigned workspaces are persistent, so they exist in Hyprland whether or
-  // not anything is in them. That is what keeps the bar from reflowing as you
-  // work — but on a single monitor, ten permanent buttons is a lot of bar for
-  // very little news. `hideEmpty` trades the stable width back for a list of
-  // only what is actually running.
-  readonly property bool hideEmpty: setting("hideEmpty", false) === true
-
   property var config: null
 
   // ── config ────────────────────────────────────────────────────────────────
@@ -141,12 +134,11 @@ BarWidget {
     // than an empty bar, so a broken or missing file is survivable.
     if (assigned === null) assigned = fallbackIds()
 
+    // Assigned workspaces are persistent, so they exist whether or not
+    // anything is in them, and the bar draws all of them. That fixed width is
+    // the point: nothing appears or moves under the pointer as you work.
     assigned.sort(function (left, right) { return left - right })
-
-    // The workspace you are standing in is never hidden, however empty — losing
-    // your own position off the bar is worse than the button it saves.
-    if (!root.hideEmpty) return assigned
-    return assigned.filter(function (id) { return root.isOccupied(id) || root.isFocused(id) })
+    return assigned
   }
 
   function fallbackIds() {

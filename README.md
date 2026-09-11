@@ -10,16 +10,6 @@ only the workspaces that monitor owns.
 - **License:** MIT
 - **Requires:** Omarchy 4 (Quattro) with `omarchy-shell`, and Hyprland's Lua config
 
-## Dependencies
-
-All ship with Omarchy and are present on a stock install:
-
-| Package | Used for |
-|---------|----------|
-| `hyprland` | `hyprctl` — reading monitors, reloading, moving workspaces |
-| `jq` | every config read and write in `bin/omarchy-workspaces` |
-| `diffutils` | `doctor`, to tell a stale generated file from a current one |
-
 ## Install
 
 ```bash
@@ -147,9 +137,6 @@ ln -s ~/.config/omarchy/plugins/io.github.kimm-stensborg.workspaces/bin/omarchy-
       ~/.local/bin/omarchy-workspaces
 ```
 
-Do not put that symlink *inside* the plugin folder — `omarchy plugin validate`
-refuses a plugin containing symlinks.
-
 ```bash
 omarchy-workspaces doctor              # does the live state match the config?
 omarchy-workspaces status              # where each workspace lives right now
@@ -158,9 +145,6 @@ omarchy-workspaces assign DP-7 1-4     # assign; accepts 1-4, 1,2,5, or 0 for 10
 omarchy-workspaces disable 4,10        # switch workspaces off entirely
 omarchy-workspaces enable 4            # and back on
 omarchy-workspaces apply               # regenerate rules, reload, re-home
-omarchy-workspaces bootstrap           # what the service runs; safe any time
-omarchy-workspaces generate            # write the rules without reloading
-omarchy-workspaces edit                # open the config in $EDITOR
 omarchy-workspaces open                # the visual editor
 ```
 
@@ -237,16 +221,6 @@ omarchy-workspaces detect --force --count=6
 | `~/.config/hypr/workspaces.lua` | generated | Workspace rules. **Do not edit** — every apply overwrites it. |
 | `~/.config/hypr/hyprland.lua` | you | Gets one guarded `require` line appended once. |
 
-## Tests
-
-```bash
-./test.sh
-```
-
-Covers the parts that are pure — argument parsing, the config transforms, and
-the shape of the generated Lua — against a fixed two-monitor fixture, so the
-results do not depend on what is plugged into the machine running them.
-
 ## Hacking on it
 
 Saving a file anywhere under `~/.config/omarchy/plugins/` reloads plugin code
@@ -255,7 +229,8 @@ the bar widget and the service; restart the shell (`omarchy restart shell`)
 after changing `Overlay.qml` or the manifest's `kinds`.
 
 ```bash
-omarchy plugin validate .
+./test.sh                  # argument parsing, config transforms, generated Lua
+omarchy plugin validate .  # what the shell will accept
 ```
 
 ## Remove
@@ -264,8 +239,8 @@ omarchy plugin validate .
 omarchy plugin remove io.github.kimm-stensborg.workspaces
 ```
 
-That unloads the widget and the service and deletes the checkout. The files it
-put outside its own folder are yours to clean up:
+That unloads the widget and the service and deletes the checkout. The files
+it put outside its own folder are yours to clean up:
 
 ```bash
 rm ~/.config/hypr/workspaces.lua
@@ -274,8 +249,6 @@ rm -f ~/.local/bin/omarchy-workspaces        # only if you linked it
 # then drop the `require(...).module("hypr.workspaces")` line from
 # ~/.config/hypr/hyprland.lua and reload: hyprctl reload
 ```
-
-The `require` is guarded, so leaving it in place is harmless.
 
 ## License
 

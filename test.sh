@@ -109,6 +109,26 @@ else
 fi
 
 echo
+echo "workspace count"
+rm -f "$WORK/ws.json"
+OMARCHY_WORKSPACES_CONFIG="$WORK/ws.json" OMARCHY_WORKSPACES_LUA="$WORK/ws.lua" \
+  bash "$CLI" detect --count=6 >/dev/null 2>&1
+if [[ -f $WORK/ws.json ]]; then
+  is "detect records the count"      "$(cfg '.count')" '6'
+  is "and seeds exactly that many"   "$(cfg '[.profiles[0].monitors[][]] | length')" '6'
+else
+  printf '  - skipped: detect needs a live Hyprland (2 checks)\n'
+fi
+seed
+has "a zero count is refused" \
+  "$(OMARCHY_WORKSPACES_CONFIG=$WORK/none.json bash "$CLI" detect --count=0 2>&1)" "positive number"
+
+seed
+run generate >/dev/null
+has "the key sweep is named, not a literal" "$(cat "$WORK/ws.lua")" "local key_slots = 10"
+has "unmanaged key slots are unbound too"   "$(cat "$WORK/ws.lua")" "disabled[ws] or not mine[ws]"
+
+echo
 echo "config guards"
 printf 'not json' >"$WORK/ws.json"
 has "a corrupt config is refused" "$(run list)" "not a version 1 config"

@@ -16,6 +16,14 @@ set -euo pipefail
 CONFIG="${OMARCHY_WORKSPACES_CONFIG:-$HOME/.config/omarchy/workspaces.json}"
 PLUGIN_ID="io.github.kimm-stensborg.workspaces"
 GENERATED="${OMARCHY_WORKSPACES_LUA:-$HOME/.config/hypr/workspaces.lua}"
+
+# Omarchy binds SUPER+1..SUPER+0 and nothing else, so ten is the number of
+# workspaces that can be reached from the keyboard at all. That is a fact about
+# Omarchy, not a choice this plugin makes — it is why `0` means workspace 10
+# everywhere, and the range apply_binds has to sweep when taking keys away.
+# How many workspaces you actually *use* is `count` in the config, and is not
+# this number; it is read from the config wherever it matters.
+KEY_SLOTS=10
 MONITORS_LUA="${OMARCHY_MONITORS_LUA:-$HOME/.config/hypr/monitors.lua}"
 QUIET=0
 
@@ -68,6 +76,13 @@ active_profile() {
   return 1
 }
 
+# How many workspaces this setup has. Ten unless the config says otherwise.
+workspace_count() {
+  local n
+  n=$(jq -r '.count // 10' "$CONFIG" 2>/dev/null)
+  [[ $n =~ ^[0-9]+$ ]] && ((n > 0)) && echo "$n" || echo "$KEY_SLOTS"
+}
+
 profile_index() {
   jq --arg n "$1" '[.profiles[].name] | index($n) // -1' "$CONFIG"
 }
@@ -76,24 +91,27 @@ profile_index() {
 
 cmd_detect() {
   [[ -f $CONFIG && ${FORCE:-0} -eq 0 ]] && die "$CONFIG already exists (pass --force to overwrite)"
+  local count=${COUNT:-$KEY_SLOTS}
+  [[ $count =~ ^[0-9]+$ ]] && ((count > 0)) || die "--count takes a positive number"
 
   # Spread 1..10 evenly over the connected monitors, left to right, and add a
   # single-monitor fallback profile for every monitor so undocking never
   # strands a workspace.
-  monitors_json | jq '
+  monitors_json | jq --argjson c "$count" '
     def selector: if (.description | length) > 0 then "desc:" + .description else .name end;
     ( sort_by(.x) ) as $mons
     | ($mons | length) as $n
     | [ range(0; $n) as $i
         | { key: ($mons[$i] | selector),
-            value: [ range(1; 11) | select((. - 1) * $n / 10 | floor == $i) ] } ]
+            value: [ range(1; $c + 1) | select((. - 1) * $n / $c | floor == $i) ] } ]
       | from_entries as $docked
     | { version: 1,
+        count: $c,
         persistent: true,
         profiles: (
           [ { name: "all-monitors", monitors: $docked } ]
           + ( $mons | map({ name: ("only-" + .name),
-                            monitors: { (selector): [ range(1; 11) ] } }) )
+                            monitors: { (selector): [ range(1; $c + 1) ] } }) )
         ) }' | write_config
 
   say "Wrote $CONFIG from the ${1:-currently} connected monitors."
@@ -105,7 +123,7 @@ cmd_list() {
   local active
   active=$(active_profile || true)
   echo
-  jq -r --arg active "$active" '
+  jq -r --arg active "$active" --argjson keys "$KEY_SLOTS" '
     .profiles[]
     | (if .name == $active then "● " else "  " end) as $mark
     | ((.scrollable // []) | map({ key: ., value: true }) | from_entries) as $scroll
@@ -115,7 +133,7 @@ cmd_list() {
         | "      " + (.key | if startswith("desc:") then ltrimstr("desc:") else . end)
           + (if $scroll[.key] then "  ⟷ scrolling" else "" end)
           + "\n        " + ([.value[]
-              | (if . == 10 then "0" else tostring end) as $label
+              | (if . == $keys then "0" else tostring end) as $label
               | if $off[. | tostring] then "(" + $label + ")" else $label end] | join(" ")) ),
       ""' "$CONFIG"
   echo "  Workspaces in (brackets) are switched off: no rule, no keybinding."
@@ -133,7 +151,7 @@ cmd_status() {
   local idx; idx=$(profile_index "$active")
   [[ $idx == -1 ]] && return 0
   local ws home actual
-  for ws in {1..10}; do
+  for ws in $(managed_workspaces); do
     local sel
     sel=$(jq -r --argjson i "$idx" --argjson w "$ws" \
       '.profiles[$i].monitors | to_entries[] | select(.value | index($w)) | .key' "$CONFIG")
@@ -161,7 +179,7 @@ expand_range() {
       ((a <= b)) || die "bad range '$tok'"
       for ((n = a; n <= b; n++)); do out+=("$n"); done
     elif [[ $tok =~ ^[0-9]+$ ]]; then
-      out+=("$((tok == 0 ? 10 : tok))")
+      out+=("$((tok == 0 ? KEY_SLOTS : tok))")
     else
       die "not a workspace number or range: '$tok'"
     fi
@@ -295,6 +313,7 @@ LUA
 }
 
 local persistent = $persistent
+local key_slots = $KEY_SLOTS
 local toggle_cmd = "bash '$self' toggle-layout"
 LUA
     cat <<'LUA'
@@ -408,9 +427,25 @@ end
 -- focused, which is the placement this plugin exists to prevent. Only the
 -- unbind is needed — a reload re-runs Omarchy's bindings and restores every
 -- key, so this pass just takes the disabled ones back out again afterwards.
+-- Which workspaces the winning profile actually speaks for. A key slot that
+-- is not in here belongs to nobody: either it is switched off, or the config
+-- has fewer workspaces than Omarchy has keys. Both want the same treatment,
+-- because a bound key with no rule behind it opens a workspace on whatever
+-- monitor happens to be focused — the placement this plugin exists to prevent.
+local function managed()
+  local set = {}
+  if groups then
+    for _, group in ipairs(groups) do
+      for _, ws in ipairs(group.workspaces) do set[ws] = true end
+    end
+  end
+  return set
+end
+
 local function apply_binds()
-  for ws = 1, 10 do
-    if disabled[ws] then
+  local mine = managed()
+  for ws = 1, key_slots do
+    if disabled[ws] or not mine[ws] then
       local code = "code:" .. tostring(ws + 9)
       hl.unbind("SUPER + " .. code)
       hl.unbind("SUPER + SHIFT + " .. code)
@@ -496,7 +531,7 @@ rehome_workspaces() {
   active=$(active_profile) || return 1
   idx=$(profile_index "$active")
   local ws sel home actual
-  for ws in {1..10}; do
+  for ws in $(managed_workspaces); do
     sel=$(jq -r --argjson i "$idx" --argjson w "$ws" \
       '.profiles[$i].monitors | to_entries[] | select(.value | index($w)) | .key' "$CONFIG")
     [[ -z $sel ]] && continue
@@ -623,7 +658,7 @@ cmd_layout() {
   local ws=${1:?usage: layout [--profile NAME] <workspace> <scrolling|dwindle|default>}
   local want=${2:?usage: layout [--profile NAME] <workspace> <scrolling|dwindle|default>}
   [[ $ws =~ ^[0-9]+$ ]] || die "not a workspace number: '$ws'"
-  ((ws == 0)) && ws=10
+  ((ws == 0)) && ws=$KEY_SLOTS
   [[ -z $profile ]] && profile=$(active_profile || die "no active profile; pass --profile")
 
   case $want in
@@ -755,14 +790,14 @@ cmd_doctor() {
   # ── live state, gathered once ─────────────────────────────────────────────
   local live_place live_layout live_binds tiling
   live_place=$(hyprctl workspaces -j | jq -r '[.[] | select(.id > 0) | "\(.id)=\(.monitor)"] | join(" ")')
-  live_layout=$(hyprctl repl 'local o = {} for i = 1, 10 do local w = hl.get_workspace(tostring(i))
-    o[#o+1] = i .. "=" .. (w and tostring(w.tiled_layout) or "gone") end return table.concat(o, " ")' 2>/dev/null)
+  live_layout=$(hyprctl repl "local o = {} for i = 1, $KEY_SLOTS do local w = hl.get_workspace(tostring(i))
+    o[#o+1] = i .. \"=\" .. (w and tostring(w.tiled_layout) or \"gone\") end return table.concat(o, \" \")" 2>/dev/null)
   live_binds=$(hyprctl binds -j | jq -r '[.[] | select(.description | test("^Switch to workspace "))
     | (.description | sub("^Switch to workspace ";""))] | join(" ")')
   tiling=$(expected_tiling)
 
   local misplaced=() wronglayout=() stillbound=() unbound=() pinned=0 off=0
-  for ws in {1..10}; do
+  for ws in $(managed_workspaces); do
     local sel; sel=$(jq -r --argjson i "$idx" --argjson w "$ws" \
       '.profiles[$i].monitors | to_entries[] | select(.value | index($w)) | .key' "$CONFIG")
     [[ -z $sel ]] && continue
@@ -1099,7 +1134,7 @@ omarchy-workspaces — pin Hyprland workspaces to specific monitors
 
   open                             Open the visual editor overlay
   bootstrap                        Seed config + rules if missing, sync if not
-  detect [--force]                 Build a config from the connected monitors
+  detect [--force] [--count=N]     Build a config from the connected monitors
   list                             Show every profile and its assignments
   status                           Show where each workspace lives right now
   doctor                           Check the live state against the config
@@ -1127,6 +1162,7 @@ main() {
     case $a in
       --quiet) QUIET=1 ;;
       --force) FORCE=1 ;;
+      --count=*) COUNT=${a#*=} ;;
       *) args+=("$a") ;;
     esac
   done

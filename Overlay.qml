@@ -41,6 +41,19 @@ Item {
   readonly property string cli: root.pluginDir + "/bin/omarchy-workspaces"
   readonly property string configPath: Quickshell.env("HOME") + "/.config/omarchy/workspaces.json"
 
+  // Omarchy binds SUPER+1..SUPER+0, so ten is how many workspaces a keyboard
+  // can reach — a fact about Omarchy, not a choice here. It is why `0` labels
+  // workspace 10. How many workspaces this setup *has* is `count`.
+  readonly property int keySlots: 10
+  readonly property int workspaceCount: {
+    var n = root.config ? Number(root.config.count) : NaN
+    return (isFinite(n) && n > 0) ? Math.floor(n) : root.keySlots
+  }
+
+  function keyLabel(id) {
+    return id === root.keySlots ? "0" : String(id)
+  }
+
   property bool opened: false
 
   // Working copy, discarded on cancel. Keyed by live output name, because that
@@ -49,6 +62,12 @@ Item {
   property var assignments: ({})
   // Workspace ids that are switched off. They still belong to a monitor.
   property var disabled: []
+
+  // How many workspaces the config itself placed, counted before the gap-fill
+  // below moves the leftovers onto the leftmost monitor. Without this, an
+  // entirely empty profile is indistinguishable from a full one by the time
+  // anything gets to look, because the fill has already placed all ten.
+  property int placedByConfig: 0
 
   // Workspace id -> layout name, for the ones SUPER+L has pinned away from
   // their monitor's setting. Read-only here: the editor shows them so the
@@ -83,7 +102,10 @@ Item {
 
   function open(payloadJson) {
     reloadFromDisk()
+    // After `opened`, not before: `monitors` reads as empty until then, and a
+    // spread across no monitors is a silent no-op.
     root.opened = true
+    spreadIfUnassigned()   // no-op until the config lands; see onConfigChanged
     Qt.callLater(function () { keys.forceActiveFocus() })
   }
 
@@ -118,7 +140,16 @@ Item {
   // summon, so open() usually runs before there is anything to show. Rebuilding
   // when the config arrives covers that, and also picks up an edit made
   // elsewhere while the editor sits open — but never on top of unsaved changes.
-  onConfigChanged: if (root.opened && !root.dirty) root.reloadFromDisk()
+  // The config is read asynchronously, so a freshly summoned editor runs
+  // open() before it has arrived. Both paths land here, and the spread is
+  // decided only once there is a config to judge — otherwise "this profile
+  // assigns nothing" and "the file has not been read yet" look identical.
+  onConfigChanged: {
+    if (root.opened && !root.dirty) {
+      root.reloadFromDisk()
+      root.spreadIfUnassigned()
+    }
+  }
 
   // Same story for shell.json, which decides where the mode toggle starts.
   onShellConfigChanged: {
@@ -282,12 +313,14 @@ Item {
       nextScroll[candidates[m].name] = nextScroll[candidates[m].name] === true
     }
 
+    root.placedByConfig = taken.length
+
     // Every workspace has to be somewhere for the picture to be complete. A
     // config written before this rule existed can leave gaps, so anything
     // unclaimed lands on the leftmost monitor rather than vanishing.
     if (candidates.length > 0) {
       var home = candidates[0].name
-      for (var id = 1; id <= 10; id++) {
+      for (var id = 1; id <= root.workspaceCount; id++) {
         if (taken.indexOf(id) === -1) next[home].push(id)
       }
       next[home].sort(function (a, b) { return a - b })
@@ -390,13 +423,28 @@ Item {
     root.dirty = true
   }
 
-  function spread() {
-    var candidates = root.monitors
-    if (candidates.length === 0) return
+  // An even spread is what a fresh config already gets from `detect`, so the
+  // only time the editor needs to do it is when it opens on a profile that
+  // assigns nothing at all — a hand-written config, or one whose monitors have
+  // all been replaced. Then it is the difference between a usable starting
+  // point and an empty picture, which is not a decision worth a button.
+  function spreadIfUnassigned() {
+    if (!root.config || root.placedByConfig > 0) return
+    // monitorList() rather than the `monitors` binding: that one is gated on
+    // `opened`, and whether it has caught up by the time open() gets here is
+    // a question about binding order, not about monitors. Asking Hyprland
+    // directly has no such question in it.
+    root.spread(root.monitorList())
+  }
+
+  function spread(candidates) {
+    if (candidates === undefined) candidates = root.monitors
+    if (!candidates || candidates.length === 0) return
     var next = ({})
     for (var m = 0; m < candidates.length; m++) next[candidates[m].name] = []
-    for (var id = 1; id <= 10; id++) {
-      next[candidates[Math.floor((id - 1) * candidates.length / 10)].name].push(id)
+    for (var id = 1; id <= root.workspaceCount; id++) {
+      var slot = Math.floor((id - 1) * candidates.length / root.workspaceCount)
+      next[candidates[slot].name].push(id)
     }
     root.assignments = next
     root.dirty = true
@@ -1282,7 +1330,6 @@ Item {
             spacing: Style.spacing.controlGap
 
             OverlayButton { ui: root; label: "Identify"; onActivated: root.identify() }
-            OverlayButton { ui: root; label: "Spread evenly"; onActivated: root.spread() }
             OverlayButton { ui: root; label: "Cancel"; onActivated: root.dismiss() }
             OverlayButton {
               ui: root
@@ -1313,7 +1360,7 @@ Item {
 
           Text {
             anchors.centerIn: parent
-            text: root.dragId === 10 ? "0" : String(root.dragId)
+            text: root.keyLabel(root.dragId)
             color: root.accent
             font.family: root.fontFamily
             font.pixelSize: Style.font.subtitle
@@ -1355,7 +1402,7 @@ Item {
 
     Text {
       anchors.centerIn: parent
-      text: chip.modelData === 10 ? "0" : String(chip.modelData)
+      text: chip.ui.keyLabel(chip.modelData)
       color: chip.ui.foreground
       // Off has to read as off at a glance, across a row of ten. Dimming the
       // number alone is too quiet next to a filled neighbour, so the fill goes

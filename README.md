@@ -105,8 +105,7 @@ picture matches the desk.
 │  │ 1  2  3 (4)        ││ 5  6  7  8         ││ 9  0        │   │
 │  └────────────────────┘└────────────────────┘└─────────────┘   │
 │                                                                │
-│  Profile: all-monitors                                         │
-│                 [Identify][Spread evenly][Cancel][Apply]       │
+│  Profile: all-monitors              [Identify][Cancel][Apply]  │
 └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -118,6 +117,9 @@ from its monitor's setting.
 - **Click** a chip to switch that workspace off — or press its number key.
   `0` is workspace 10.
 - **Drag a monitor** to move it on the desk — see below.
+- Workspaces are spread evenly across your monitors when the config is first
+  built, and again if the editor ever opens on a profile that assigns nothing.
+  There is no button for it, because it is not a thing you should need twice.
 - **Identify** puts a big number and connector name on each physical screen for
   three seconds, so you can tell which `DP-` is which without counting cables.
 - **Hide empty** sets what every bar draws, described under *Widget settings*.
@@ -314,6 +316,7 @@ Anything that needs a live Hyprland is `doctor`'s job instead.
 ```json
 {
   "version": 1,
+  "count": 10,
   "persistent": true,
   "profiles": [
     {
@@ -335,6 +338,15 @@ connected is used. Put your most specific profile first.
 
 A monitor key is either a bare output name (`eDP-1`) or `desc:` plus the
 monitor description from `hyprctl monitors`. Prefer `desc:` — output names move.
+
+`count` is how many workspaces you use, and defaults to 10. Omarchy binds
+`SUPER+1` to `SUPER+0` and nothing else, so ten is the most that can be reached
+from the keyboard; set it lower and the surplus keys are unbound rather than
+left to open a workspace on whichever monitor happens to be focused.
+
+```bash
+omarchy-workspaces detect --force --count=6
+```
 
 `disabled` is optional and lists the workspaces that are switched off in that
 profile. They stay in `monitors` — off is a state, not a removal.

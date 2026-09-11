@@ -19,6 +19,10 @@ BarWidget {
 
   readonly property string configPath: Quickshell.env("HOME") + "/.config/omarchy/workspaces.json"
 
+  // Omarchy binds SUPER+1..SUPER+0, so ten is how many workspaces a keyboard
+  // can reach, and why `0` labels workspace 10.
+  readonly property int keySlots: 10
+
   // Assigned workspaces are persistent, so they exist in Hyprland whether or
   // not anything is in them. That is what keeps the bar from reflowing as you
   // work — but on a single monitor, ten permanent buttons is a lot of bar for
@@ -156,7 +160,7 @@ BarWidget {
     var values = Hyprland.workspaces ? Hyprland.workspaces.values : []
     for (var i = 0; i < values.length; i++) {
       var id = values[i].id
-      if (id > 0 && id <= 10 && out.indexOf(id) === -1) out.push(id)
+      if (id > 0 && id <= root.keySlots && out.indexOf(id) === -1) out.push(id)
     }
     return out
   }
@@ -192,7 +196,7 @@ BarWidget {
         readonly property bool focused: root.isFocused(modelData)
 
         bar: root.bar
-        text: focused ? "󱓻" : (modelData === 10 ? "0" : String(modelData))
+        text: focused ? "󱓻" : (modelData === root.keySlots ? "0" : String(modelData))
         opacity: occupied || focused ? 1 : 0.5
         horizontalMargin: 6
         verticalPadding: 6

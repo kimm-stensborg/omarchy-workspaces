@@ -9,11 +9,16 @@ import qs.Ui
 // Visual workspace-to-monitor editor.
 //
 // Monitors are drawn to scale in their real desktop arrangement, so the picture
-// on screen matches the one on the desk. Workspaces are chips you drag from one
-// monitor to another; whatever is left over sits in the unassigned tray and
-// falls back to Hyprland's default placement. The monitors themselves are
-// draggable too — moving one rearranges the desk, which is a rewrite of the
-// positions in ~/.config/hypr/monitors.lua rather than of this plugin's config.
+// on screen matches the one on the desk. Every workspace lives on exactly one
+// monitor: drag a chip to move it to another, click it to switch it off. The
+// monitors themselves are draggable too — moving one rearranges the desk,
+// which is a rewrite of the positions in ~/.config/hypr/monitors.lua rather
+// than of this plugin's config.
+//
+// A workspace that is off keeps its place in the picture but gets no rule and
+// no keybinding, so it cannot be reached or created at all. That is the whole
+// of "off" — there is no third state where Hyprland places a workspace itself,
+// because a workspace with no home is the thing this plugin exists to prevent.
 //
 // Nothing is written until Apply. The whole layout then goes out in a single
 // `set-layout` call to the bundled CLI, so a half-applied arrangement is not a
@@ -42,7 +47,8 @@ Item {
   // is what the stage draws and what the CLI translates back into a stable
   // desc: selector on save.
   property var assignments: ({})
-  property var unassigned: []
+  // Workspace ids that are switched off. They still belong to a monitor.
+  property var disabled: []
   // Live output name -> bool. Which monitors run Hyprland's scrolling layout
   // instead of tiling; a per-monitor choice, because a wide desk display and a
   // laptop panel rarely want the same one.
@@ -241,6 +247,7 @@ Item {
     root.profileName = ""
 
     var profiles = root.config ? root.config.profiles : []
+    var profileFound = null
     for (var p = 0; p < profiles.length; p++) {
       var entries = profiles[p].monitors || {}
       var resolved = ({})
@@ -258,6 +265,7 @@ Item {
           if (scrollName) nextScroll[scrollName] = true
         }
         root.profileName = String(profiles[p].name || "")
+        profileFound = profiles[p]
         break
       }
     }
@@ -269,11 +277,19 @@ Item {
       nextScroll[candidates[m].name] = nextScroll[candidates[m].name] === true
     }
 
-    var left = []
-    for (var id = 1; id <= 10; id++) if (taken.indexOf(id) === -1) left.push(id)
+    // Every workspace has to be somewhere for the picture to be complete. A
+    // config written before this rule existed can leave gaps, so anything
+    // unclaimed lands on the leftmost monitor rather than vanishing.
+    if (candidates.length > 0) {
+      var home = candidates[0].name
+      for (var id = 1; id <= 10; id++) {
+        if (taken.indexOf(id) === -1) next[home].push(id)
+      }
+      next[home].sort(function (a, b) { return a - b })
+    }
 
     root.assignments = next
-    root.unassigned = left
+    root.disabled = ((profileFound && profileFound.disabled) || []).slice()
     root.scrollable = nextScroll
     root.hideEmpty = root.currentHideEmpty()
     root.initialHideEmpty = root.hideEmpty
@@ -319,21 +335,16 @@ Item {
   // A workspace belongs to exactly one place, so a move is always a remove from
   // everywhere followed by a single insert.
   function moveWorkspace(id, targetName) {
+    if (!root.assignments[targetName]) return
+
     var next = ({})
     for (var name in root.assignments) {
       next[name] = root.assignments[name].filter(function (value) { return value !== id })
     }
-    var left = root.unassigned.filter(function (value) { return value !== id })
-
-    if (targetName === "") left.push(id)
-    else if (next[targetName]) next[targetName].push(id)
-    else return
-
+    next[targetName].push(id)
     for (var key in next) next[key].sort(function (a, b) { return a - b })
-    left.sort(function (a, b) { return a - b })
 
     root.assignments = next
-    root.unassigned = left
     root.dirty = true
   }
 
@@ -352,16 +363,18 @@ Item {
     root.dirty = true
   }
 
-  // Click, rather than drag, walks a workspace to the next monitor. Same result
-  // as a drag for the common "just move it one over" case, and it keeps the
-  // editor usable from the number keys alone.
-  function cycleWorkspace(id) {
-    var order = root.monitors.map(function (monitor) { return monitor.name }).concat([""])
-    var current = ""
-    for (var name in root.assignments) {
-      if (root.assignments[name].indexOf(id) !== -1) { current = name; break }
-    }
-    root.moveWorkspace(id, order[(order.indexOf(current) + 1) % order.length])
+  function isDisabled(id) {
+    return root.disabled.indexOf(id) !== -1
+  }
+
+  // Dragging is how a workspace changes monitor, so a click is free to mean
+  // the other thing you want from a pill: whether the workspace exists at all.
+  function toggleWorkspace(id) {
+    var next = root.disabled.filter(function (value) { return value !== id })
+    if (next.length === root.disabled.length) next.push(id)
+    next.sort(function (a, b) { return a - b })
+    root.disabled = next
+    root.dirty = true
   }
 
   function spread() {
@@ -373,7 +386,6 @@ Item {
       next[candidates[Math.floor((id - 1) * candidates.length / 10)].name].push(id)
     }
     root.assignments = next
-    root.unassigned = []
     root.dirty = true
   }
 
@@ -406,7 +418,8 @@ Item {
 
     command += run + "set-layout --base64 "
       + Qt.btoa(JSON.stringify(payload))
-      + " --scrollable-base64 " + Qt.btoa(JSON.stringify(scrolling)) + " --quiet"
+      + " --scrollable-base64 " + Qt.btoa(JSON.stringify(scrolling))
+      + " --disabled-base64 " + Qt.btoa(JSON.stringify(root.disabled)) + " --quiet"
     if (root.hideEmpty !== root.initialHideEmpty)
       command += " && " + run + "hide-empty " + (root.hideEmpty ? "on" : "off") + " --quiet"
     command += " && " + run + "apply --quiet"
@@ -498,7 +511,7 @@ Item {
 
   // A monitor being dragged stays inside the desk it belongs to. The picture is
   // a picture of the desk, and a screen dragged out of it would be drawn over
-  // the tray and the buttons and off the edge of the card — so the extent
+  // the buttons and off the edge of the card — so the extent
   // frozen at the start of the drag is also the fence around it. It does mean
   // a drag can only rearrange the envelope the desk already has: a row of
   // monitors reorders within the row, and stacking one above another is a
@@ -731,6 +744,32 @@ Item {
   // the drop target is hit-tested on release, which keeps the Flow layouts
   // still and makes "what is under the pointer" one obvious calculation.
 
+  // Which screen is which. The editor names monitors the way Hyprland does
+  // (DP-5, DP-7), and those names carry no hint about where the panel actually
+  // stands on the desk — on two identical displays they can even swap between
+  // boots. Identify answers it the only way that cannot be misread: by putting
+  // the name on the glass.
+  property bool identifying: false
+
+  function identify() {
+    root.identifying = true
+    identifyTimeout.restart()
+  }
+
+  Timer {
+    id: identifyTimeout
+    interval: 3000
+    repeat: false
+    onTriggered: root.identifying = false
+  }
+
+  function monitorIndex(name) {
+    for (var i = 0; i < root.monitors.length; i++) {
+      if (root.monitors[i].name === String(name)) return i + 1
+    }
+    return 0
+  }
+
   property bool dragging: false
   property int dragId: 0
   property real dragX: 0
@@ -749,10 +788,10 @@ Item {
         return
       }
     }
-    var trayPoint = tray.mapFromGlobal(globalX, globalY)
+    // Off the monitors entirely: no drop target, so the drag is a no-op and
+    // the workspace stays where it was.
     root.hoverTarget = ""
-    root.hoverValid = trayPoint.x >= 0 && trayPoint.y >= 0
-      && trayPoint.x <= tray.width && trayPoint.y <= tray.height
+    root.hoverValid = false
   }
 
   // The chips call these rather than touching the card or the stage. Inline
@@ -782,6 +821,76 @@ Item {
   }
 
   // ── surface ───────────────────────────────────────────────────────────────
+
+  // One label per screen, shown for a few seconds. A separate window per
+  // screen rather than something drawn inside the editor, because the whole
+  // point is to appear on the physical panel being named — the editor itself
+  // only ever occupies one of them.
+  //
+  // keyboardFocus None matters: these must not take focus from the editor
+  // underneath, or Esc and the number keys would stop working while they show.
+  Variants {
+    model: root.identifying ? Quickshell.screens : []
+
+    PanelWindow {
+      id: identifyPanel
+      required property var modelData
+
+      screen: modelData
+      anchors { top: true; bottom: true; left: true; right: true }
+      color: "transparent"
+      WlrLayershell.namespace: "omarchy-workspaces-identify"
+      WlrLayershell.layer: WlrLayer.Overlay
+      WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+      exclusionMode: ExclusionMode.Ignore
+
+      // Click-through, so the editor stays usable while the labels are up.
+      mask: Region {}
+
+      Rectangle {
+        anchors.centerIn: parent
+        width: identifyColumn.implicitWidth + Style.spacing.panelPadding * 2
+        height: identifyColumn.implicitHeight + Style.spacing.panelPadding * 2
+        radius: Style.cornerRadius
+        color: root.background
+        border.width: Math.max(1, Style.space(2))
+        border.color: root.accent
+
+        Column {
+          id: identifyColumn
+          anchors.centerIn: parent
+          spacing: Style.spacing.sm
+
+          Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            text: String(root.monitorIndex(identifyPanel.modelData.name))
+            color: root.accent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.subtitle * 4
+            font.bold: true
+            textFormat: Text.PlainText
+          }
+          Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            text: String(identifyPanel.modelData.name)
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.subtitle
+            textFormat: Text.PlainText
+          }
+          Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            text: identifyPanel.modelData.width + " x " + identifyPanel.modelData.height
+            color: root.foreground
+            opacity: 0.5
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            textFormat: Text.PlainText
+          }
+        }
+      }
+    }
+  }
 
   PanelWindow {
     id: panel
@@ -826,7 +935,7 @@ Item {
             root.dirty = true
             event.accepted = true
           } else if (event.text >= "0" && event.text <= "9" && event.text.length === 1) {
-            root.cycleWorkspace(event.text === "0" ? 10 : parseInt(event.text))
+            root.toggleWorkspace(event.text === "0" ? 10 : parseInt(event.text))
             event.accepted = true
           }
         }
@@ -865,8 +974,8 @@ Item {
             Text {
               width: parent.width
               text: root.monitors.length > 1
-                ? "Drag a workspace onto a monitor, or click one to send it to the next. Drag a monitor to rearrange the desk."
-                : "One monitor, so everything lives here — drop one below to unpin it."
+                ? "Drag a workspace to another monitor, or a monitor to rearrange the desk. Click a workspace to switch it off."
+                : "One monitor, so everything lives here. Click a workspace to switch it off."
               color: root.foreground
               opacity: 0.6
               font.family: root.fontFamily
@@ -1131,46 +1240,6 @@ Item {
           }
         }
 
-        // ── unassigned tray ─────────────────────────────────────────────────
-        Rectangle {
-          id: tray
-          width: parent.width
-          height: Math.max(Style.space(54), trayRow.implicitHeight + Style.spacing.md * 2)
-          radius: Style.cornerRadius
-          readonly property bool targeted: root.dragging && root.hoverValid && root.hoverTarget === ""
-          color: targeted ? Style.selectedFill : "transparent"
-          border.width: 1
-          border.color: targeted ? root.accent
-            : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.15)
-
-          Row {
-            id: trayRow
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            anchors.leftMargin: Style.spacing.md
-            anchors.rightMargin: Style.spacing.md
-            spacing: Style.spacing.md
-
-            Text {
-              anchors.verticalCenter: parent.verticalCenter
-              text: root.unassigned.length > 0
-                ? "Unpinned — Hyprland places these wherever you are"
-                : "Unpinned — drop a workspace here to let it roam"
-              color: root.foreground
-              opacity: 0.5
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              textFormat: Text.PlainText
-            }
-
-            Repeater {
-              model: root.unassigned
-              WorkspaceChip { ui: root; muted: true }
-            }
-          }
-        }
-
         // ── footer ──────────────────────────────────────────────────────────
         Item {
           width: parent.width
@@ -1194,6 +1263,7 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.spacing.controlGap
 
+            OverlayButton { ui: root; label: "Identify"; onActivated: root.identify() }
             OverlayButton { ui: root; label: "Spread evenly"; onActivated: root.spread() }
             OverlayButton { ui: root; label: "Cancel"; onActivated: root.dismiss() }
             OverlayButton {
@@ -1253,22 +1323,40 @@ Item {
     property bool muted: false
 
     readonly property bool lifted: ui.dragging && ui.dragId === modelData
+    readonly property bool off: ui.isDisabled(modelData)
 
     width: ui.chipSize
     height: ui.chipSize
     radius: Style.cornerRadius
-    color: chipHover.hovered || lifted ? Style.hoverFill : Style.normalFill
+    color: off ? "transparent" : (chipHover.hovered || lifted ? Style.hoverFill : Style.normalFill)
     border.width: 1
-    border.color: Qt.rgba(ui.foreground.r, ui.foreground.g, ui.foreground.b, lifted ? 0.1 : 0.3)
-    opacity: lifted ? 0.3 : (muted ? 0.65 : 1)
+    border.color: off
+      ? Qt.rgba(ui.foreground.r, ui.foreground.g, ui.foreground.b, 0.2)
+      : Qt.rgba(ui.foreground.r, ui.foreground.g, ui.foreground.b, lifted ? 0.1 : 0.3)
+    opacity: lifted ? 0.3 : 1
 
     Text {
       anchors.centerIn: parent
       text: chip.modelData === 10 ? "0" : String(chip.modelData)
       color: chip.ui.foreground
+      // Off has to read as off at a glance, across a row of ten. Dimming the
+      // number alone is too quiet next to a filled neighbour, so the fill goes
+      // too and what is left is an outline.
+      opacity: chip.off ? 0.35 : 1
       font.family: chip.ui.fontFamily
       font.pixelSize: Style.font.subtitle
       textFormat: Text.PlainText
+    }
+
+    // A line through the number, so the state survives a colourblind reading
+    // and a dim screen.
+    Rectangle {
+      visible: chip.off
+      anchors.centerIn: parent
+      width: parent.width * 0.52
+      height: 1
+      color: chip.ui.foreground
+      opacity: 0.35
     }
 
     HoverHandler { id: chipHover; cursorShape: Qt.OpenHandCursor }
@@ -1300,7 +1388,7 @@ Item {
 
       onReleased: function (mouse) {
         if (!moved) {
-          chip.ui.cycleWorkspace(chip.modelData)
+          chip.ui.toggleWorkspace(chip.modelData)
           return
         }
         var point = chip.mapToGlobal(mouse.x, mouse.y)

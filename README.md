@@ -97,27 +97,33 @@ picture matches the desk.
 ```
 ┌───────────────────────────────────────────────────────────────┐
 │  Workspaces                                      [✓ Hide empty]│
-│  Drag a workspace onto a monitor, or click one to send it to   │
-│  the next. Drag a monitor to rearrange the desk.               │
+│  Drag a workspace to another monitor, or a monitor to           │
+│  rearrange the desk. Click a workspace to switch it off.        │
 │                                                                │
 │  ┌── DP-7 ──[⟷ Scroll]┐┌── DP-5 ──[⟷ Scroll]┐┌ eDP-1 ─────┐   │
 │  │ 2560 x 1440        ││ 2560 x 1440        ││ 1920 x 1200 │   │
-│  │ 1  2  3  4         ││ 5  6  7  8         ││ 9  0        │   │
+│  │ 1  2  3 (4)        ││ 5  6  7  8         ││ 9  0        │   │
 │  └────────────────────┘└────────────────────┘└─────────────┘   │
 │                                                                │
-│  Unpinned — drop a workspace here to let it roam               │
-│                                                                │
-│  Profile: all-monitors       [Spread evenly][Cancel][Apply]    │
+│  Profile: all-monitors                                         │
+│                 [Identify][Spread evenly][Cancel][Apply]       │
 └────────────────────────────────────────────────────────────────┘
 ```
 
+`(4)` is switched off: an outline with a line through it, and no keybinding.
+
 - **Drag** a workspace chip from one monitor to another.
-- **Click** a chip to send it to the next monitor — or press its number key.
+- **Click** a chip to switch that workspace off — or press its number key.
   `0` is workspace 10.
-- **Drop it in the tray** to unpin it, letting Hyprland place it wherever you are.
 - **Drag a monitor** to move it on the desk — see below.
+- **Identify** puts a big number and connector name on each physical screen for
+  three seconds, so you can tell which `DP-` is which without counting cables.
 - **Hide empty** sets what every bar draws, described under *Widget settings*.
 - Nothing is written until **Apply**; `Esc` or **Cancel** throws the edit away.
+
+Every workspace always belongs to exactly one monitor. There is no third state
+where Hyprland places a workspace itself — a workspace with no home is the
+thing this plugin exists to prevent.
 
 ### Rearranging the desk
 
@@ -174,6 +180,27 @@ which puts it under **Setup → Workspaces**:
 
 Or bind a key in `~/.config/hypr/bindings.lua`.
 
+## Switching a workspace off
+
+A workspace that is off gets no rule, no persistence, and **no keybinding**:
+`SUPER+4` becomes a no-op, and the workspace cannot be created or reached at
+all. It is not hidden, it is gone. Use it to cut ten workspaces down to the
+number you actually keep.
+
+```bash
+omarchy-workspaces disable 4,10    # or a range: 7-10
+omarchy-workspaces enable 4
+```
+
+It keeps its place on a monitor while off, so the editor still draws the pill
+where it was and one click brings it back.
+
+The unbind is the only part that reaches outside this plugin's own files. It is
+done by `hl.unbind` in the generated Lua, after the config settles, because
+Hyprland loads Omarchy's bindings after `hypr/workspaces.lua`. Nothing is
+rebound on the way back: a reload re-runs Omarchy's bindings and restores every
+key, and the settle pass then removes only the ones still switched off.
+
 ## What it does
 
 - **Pins workspaces to monitors.** Generates Hyprland `workspace_rule` entries
@@ -212,6 +239,8 @@ omarchy-workspaces list                # every profile and its assignments
 omarchy-workspaces assign DP-7 1-4     # assign; accepts 1-4, 1,2,5, or 0 for 10
 omarchy-workspaces apply               # regenerate rules, reload, re-home
 omarchy-workspaces bootstrap           # what the service runs; safe any time
+omarchy-workspaces disable 4,10        # switch workspaces off entirely
+omarchy-workspaces enable 4            # and back on
 omarchy-workspaces scrollable DP-5 on  # that monitor's workspaces scroll, not tile
 omarchy-workspaces arrange DP-5 0x0 DP-7 2560x0   # move monitors on the desk
 omarchy-workspaces hide-empty on       # bar draws only workspaces holding windows
@@ -259,6 +288,9 @@ connected is used. Put your most specific profile first.
 A monitor key is either a bare output name (`eDP-1`) or `desc:` plus the
 monitor description from `hyprctl monitors`. Prefer `desc:` — output names move.
 
+`disabled` is optional and lists the workspaces that are switched off in that
+profile. They stay in `monitors` — off is a state, not a removal.
+
 `scrollable` is optional and lists the monitors whose workspaces use Hyprland's
 `scrolling` layout instead of tiling. It is per profile and per monitor, because
 a wide desk display and a laptop panel rarely want the same answer. The editor
@@ -277,6 +309,27 @@ Set these inline on the widget's entry in `~/.config/omarchy/shell.json`:
 | Key | Default | Meaning |
 |---|---|---|
 | `hideEmpty` | `false` | Draw only the workspaces that hold windows, instead of every workspace assigned to this monitor. The focused workspace is always drawn, however empty. The editor's toggle sets this. |
+
+Switched-off workspaces are never drawn, whatever `hideEmpty` says — a button
+for a workspace with no keybinding would offer something that does not work.
+
+## Scrolling and Omarchy's SUPER+L
+
+Omarchy binds `SUPER+L` to a per-workspace layout toggle, and that toggle
+**persists**: it writes `~/.local/state/omarchy/workspace-layouts/<id>.lua`,
+which `default.hypr.toggles` loads from `hyprland.lua` *after*
+`hypr/workspaces.lua`. A saved override therefore lands on top of this plugin's
+rules on every reload and wins, permanently and silently — one monitor ends up
+half converted, the editor says one thing and the screen does another, and the
+scroll toggle looks broken because the workspace you are looking at is the one
+that will not change.
+
+So `apply` deletes the saved overrides for the workspaces it manages, and the
+generated Lua re-asserts its own layouts once the config has settled, which
+puts this plugin's answer last. `SUPER+L` still works exactly as before — its
+choice simply no longer outlives the next apply.
+
+If you prefer `SUPER+L` to be the authority, do not set `scrollable` here.
 
 ## How keys behave
 

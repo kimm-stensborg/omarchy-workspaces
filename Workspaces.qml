@@ -92,11 +92,16 @@ BarWidget {
 
   // First profile whose every monitor is connected wins — the same rule the
   // generated Lua uses, so the bar and the compositor never disagree.
+  //
+  // A switched-off workspace has no rule and no keybinding, so it cannot be
+  // reached at all; drawing a button for it would offer something that does
+  // not work. They are filtered out here rather than dimmed.
   function assignedIds() {
     if (!config) return null
     var monitors = monitorList()
     for (var p = 0; p < config.profiles.length; p++) {
       var assignments = config.profiles[p].monitors || {}
+      var off = config.profiles[p].disabled || []
       var mine = null
       var complete = true
       for (var selector in assignments) {
@@ -104,7 +109,10 @@ BarWidget {
         if (!name) { complete = false; break }
         if (name === root.screenName) mine = (assignments[selector] || []).slice()
       }
-      if (complete) return mine
+      if (complete) {
+        if (mine === null) return null
+        return mine.filter(function (id) { return off.indexOf(id) === -1 })
+      }
     }
     return null
   }

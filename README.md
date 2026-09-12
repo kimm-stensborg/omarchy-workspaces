@@ -83,16 +83,13 @@ the desk. Every workspace belongs to exactly one monitor.
 
 Add a menu entry by putting this in
 `~/.config/omarchy/extensions/omarchy-menu.jsonc` (it hot-reloads on save),
-which puts it under **Setup → Workspaces**:
+which puts it under **Setup → Workspaces**. Paste it before the file's closing
+`}`, and keep it on one line: that is how the
+[Plugin Manager](https://github.com/kimm-stensborg/omarchy-plugin-manager)
+finds it.
 
 ```jsonc
-"setup.workspaces": {
-  "icon": "󰕰",
-  "label": "Workspaces",
-  "description": "Pin workspaces to monitors",
-  "aliases": ["workspaces", "monitors"],
-  "action": "omarchy-shell shell summon io.github.kimm-stensborg.workspaces '{}'"
-},
+"setup.workspaces":{"icon":"󰕰","label":"Workspaces","description":"Pin workspaces to monitors","aliases":["workspaces","monitors"],"action":"omarchy-shell shell summon io.github.kimm-stensborg.workspaces '{}'"},
 ```
 
 Or bind a key in `~/.config/hypr/bindings.lua`.

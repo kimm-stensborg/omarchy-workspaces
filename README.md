@@ -1,4 +1,4 @@
-# Workspaces per Monitor
+# Workspaces
 
 Pin Hyprland workspaces to specific monitors, and make each monitor's bar show
 only the workspaces that monitor owns.
@@ -82,7 +82,7 @@ one). The first time the service runs, it writes that shortcut to
 `~/.config/hypr/bindings.lua`, if the key is free:
 
 ```lua
--- Workspaces per Monitor (io.github.kimm-stensborg.workspaces)
+-- Workspaces (io.github.kimm-stensborg.workspaces)
 o.bind("SUPER + code:49", "Workspace overview", "omarchy-shell shell summon io.github.kimm-stensborg.workspaces '{\"view\":\"overview\"}'")
 ```
 

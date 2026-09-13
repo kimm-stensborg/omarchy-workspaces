@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "io.github.kimm-stensborg.workspaces",
-  "name": "Workspaces per Monitor",
+  "name": "Workspaces",
   "version": "1.2.0",
   "author": "Kimm Stensborg",
   "license": "MIT",
@@ -17,7 +17,7 @@
     "service": "Service.qml"
   },
   "barWidget": {
-    "displayName": "Workspaces per Monitor",
+    "displayName": "Workspaces",
     "description": "Workspace indicators filtered to the monitor the bar is on, with a button for the full-screen overview",
     "category": "Compositor",
     "allowMultiple": false,

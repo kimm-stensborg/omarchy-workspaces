@@ -905,7 +905,7 @@ cmd_bind_overview() {
 
   # The newline after the line is ours to add: $(...) strips it, and without
   # it the next thing appended to the file lands on the same line.
-  printf '\n-- Workspaces per Monitor (%s)\n%s\n' "$PLUGIN_ID" "$(overview_bind_line)" >>"$BINDINGS"
+  printf '\n-- Workspaces (%s)\n%s\n' "$PLUGIN_ID" "$(overview_bind_line)" >>"$BINDINGS"
   say "Bound the workspace overview to $OVERVIEW_KEY in $BINDINGS"
 }
 

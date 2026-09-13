@@ -162,7 +162,7 @@ fresh() { rm -rf "$WORK/bstate"; printf -- '-- mine\n' >"$WORK/hypr/bindings.lua
 fresh; bind >/dev/null
 B=$(cat "$WORK/hypr/bindings.lua")
 has "writes the block under the plugin's own comment" "$B" \
-  "-- Workspaces per Monitor (io.github.kimm-stensborg.workspaces)"
+  "-- Workspaces (io.github.kimm-stensborg.workspaces)"
 has "binds the key left of 1 by position" "$B" 'o.bind("SUPER + code:49", "Workspace overview",'
 has "summons the overview, payload escaped for Lua" "$B" \
   "summon io.github.kimm-stensborg.workspaces '{\\\"view\\\":\\\"overview\\\"}'\")"
@@ -179,7 +179,7 @@ PM=$(grep 'o\.bind(' "$WORK/hypr/bindings.lua" | jq -Rr '
 is "Plugin Manager reads back the real command" "$PM" \
   "omarchy-shell shell summon io.github.kimm-stensborg.workspaces '{\"view\":\"overview\"}'"
 
-sed -i '/Workspaces per Monitor/,+1d' "$WORK/hypr/bindings.lua"
+sed -i '/^-- Workspaces (/,+1d' "$WORK/hypr/bindings.lua"
 bind >/dev/null
 is "a removed shortcut stays removed" "$(grep -c 'o.bind' "$WORK/hypr/bindings.lua")" '0'
 bind --force >/dev/null

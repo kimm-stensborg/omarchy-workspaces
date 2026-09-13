@@ -83,7 +83,7 @@ one). The first time the service runs, it writes that shortcut to
 
 ```lua
 -- Workspaces per Monitor (io.github.kimm-stensborg.workspaces)
-o.bind("SUPER + code:49", "Workspace overview", "omarchy-shell shell toggle io.github.kimm-stensborg.workspaces '{\"view\":\"overview\"}'")
+o.bind("SUPER + code:49", "Workspace overview", "omarchy-shell shell summon io.github.kimm-stensborg.workspaces '{\"view\":\"overview\"}'")
 ```
 
 It is bound by key position (`code:49`) rather than by name, so it stays the
@@ -112,6 +112,9 @@ the desk. Every workspace belongs to exactly one monitor.
   The same number sits in the corner of each card, which is what makes the two
   pictures line up.
 - Nothing is written until **Apply**; `Esc` or **Cancel** throws the edit away.
+- The footer shows the overview's shortcut as your keyboard labels it — `SUPER
+  + ½` on a Danish one — read fresh each time, so it follows the key if you
+  move it.
 
 Add a menu entry by putting this in
 `~/.config/omarchy/extensions/omarchy-menu.jsonc` (it hot-reloads on save),

@@ -214,8 +214,10 @@ BarWidget {
   // reached for it — focus has not necessarily followed the pointer there yet.
   function toggleOverview() {
     var shell = root.bar ? root.bar.shell : null
-    if (!shell || typeof shell.toggle !== "function") return
-    shell.toggle(root.moduleName, JSON.stringify({ view: "overview", screen: root.screenName }))
+    // Summon, not toggle: the overlay does its own toggling, so a second
+    // summon while it is up closes it. See open() in Overlay.qml for why.
+    if (!shell || typeof shell.summon !== "function") return
+    shell.summon(root.moduleName, JSON.stringify({ view: "overview", screen: root.screenName }))
   }
 
   // ── layout ────────────────────────────────────────────────────────────────

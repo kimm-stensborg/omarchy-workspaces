@@ -94,6 +94,18 @@ Item {
   // existing menu entry and binding sends — still means the editor.
   property string view: "editor"
 
+  // The overview's shortcut as the keyboard prints it ("SUPER + ½"), for the
+  // editor's footer. Asked again on every open, since Plugin Manager can move
+  // it at any time; empty when there is none.
+  property string overviewShortcut: ""
+
+  Process {
+    id: overviewKeyProc
+    command: ["bash", root.cli, "overview-key"]
+    stdout: StdioCollector { onStreamFinished: root.overviewShortcut = text.trim() }
+    onExited: function (code) { if (code !== 0) root.overviewShortcut = "" }
+  }
+
   function open(payloadJson) {
     var payload = ({})
     try {
@@ -102,11 +114,21 @@ Item {
       console.warn(root.pluginId, "ignoring unreadable payload", payloadJson)
     }
     if (payload.view === "overview") {
+      // The shortcut and the bar button summon rather than toggle, and the
+      // toggling happens here, where an echo can be told from a second press.
+      // An input method in the path — fcitx5's virtual keyboard, for one — can
+      // deliver a single press twice, 60–200 ms apart, and a toggle in the
+      // shell would open the overview and shut it again before it was seen.
+      if (root.overviewShown) {
+        if (Date.now() - root.overviewOpenedAt > root.echoWindow) root.dismiss()
+        return
+      }
       root.openOverview(String(payload.screen || ""))
       return
     }
 
     root.view = "editor"
+    overviewKeyProc.running = true
     reloadFromDisk()
     // After `opened`, not before: `monitors` reads as empty until then, and a
     // spread across no monitors is a silent no-op.
@@ -752,6 +774,57 @@ Item {
           width: parent.width
           height: Style.spacing.controlHeight
 
+          // Where the overview is, since this is where people come to set
+          // things up. The shortcut is whatever it is now, not what it was
+          // first bound to — Plugin Manager can move it.
+          Row {
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.spacing.sm
+
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              text: root.overviewShortcut ? "Overview" : "Overview: 󰖳 in the bar"
+              color: root.foreground
+              opacity: 0.6
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              textFormat: Text.PlainText
+            }
+
+            Rectangle {
+              visible: root.overviewShortcut !== ""
+              anchors.verticalCenter: parent.verticalCenter
+              width: shortcutLabel.implicitWidth + Style.spacing.sm * 2
+              height: shortcutLabel.implicitHeight + Style.spacing.xxs * 2
+              radius: Style.cornerRadius
+              color: Style.normalFill
+              border.width: 1
+              border.color: root.hairline
+
+              Text {
+                id: shortcutLabel
+                anchors.centerIn: parent
+                text: root.overviewShortcut
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                textFormat: Text.PlainText
+              }
+            }
+
+            Text {
+              visible: root.overviewShortcut !== ""
+              anchors.verticalCenter: parent.verticalCenter
+              text: "or 󰖳 in the bar"
+              color: root.foreground
+              opacity: 0.6
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              textFormat: Text.PlainText
+            }
+          }
+
           Row {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
@@ -817,6 +890,12 @@ Item {
   property var overviewScreen: null
   property int overviewSelected: 0
 
+  // When the overview last opened, and how long after that a summon counts
+  // as the same press arriving twice rather than a second press. A quick tap
+  // is well under this; two deliberate presses are well over it.
+  property real overviewOpenedAt: 0
+  readonly property int echoWindow: 400
+
   function screenFor(name) {
     var screens = Quickshell.screens
     for (var i = 0; i < screens.length; i++) {
@@ -841,6 +920,7 @@ Item {
       || (Hyprland.focusedMonitor ? String(Hyprland.focusedMonitor.name || "") : "")
     root.overviewScreen = root.screenFor(name)
     root.overviewSelected = Hyprland.focusedWorkspace ? Hyprland.focusedWorkspace.id : 0
+    root.overviewOpenedAt = Date.now()
     root.view = "overview"
     root.opened = true
     Qt.callLater(function () { overviewKeys.forceActiveFocus() })
@@ -1280,7 +1360,8 @@ Item {
         text: tile.ui.keyLabel(tile.modelData)
         color: tile.focused ? tile.ui.accent : tile.ui.foreground
         font.family: tile.ui.fontFamily
-        font.pixelSize: Style.font.bodySmall
+        font.pixelSize: Style.font.bodySmall * 2
+        font.bold: true
         textFormat: Text.PlainText
       }
     }

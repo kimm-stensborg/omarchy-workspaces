@@ -843,9 +843,11 @@ cmd_open() {
     die "could not summon the overlay (is omarchy-shell running?)"
 }
 
-# Toggle rather than summon, so the key that opens the overview also closes it.
+# Summon, and the overlay toggles: a summon while it is up closes it, unless it
+# lands so soon after opening that it is the same press arriving twice. A
+# toggle in the shell cannot tell those apart. See open() in Overlay.qml.
 cmd_overview() {
-  omarchy-shell shell toggle "$PLUGIN_ID" "$OVERVIEW_PAYLOAD" >/dev/null 2>&1 ||
+  omarchy-shell shell summon "$PLUGIN_ID" "$OVERVIEW_PAYLOAD" >/dev/null 2>&1 ||
     die "could not open the overview (is omarchy-shell running?)"
 }
 
@@ -861,7 +863,7 @@ cmd_overview() {
 # Returns 0 only when it wrote something, so bootstrap knows to reload.
 
 overview_bind_line() {
-  printf 'o.bind("%s", "Workspace overview", "omarchy-shell shell toggle %s '\''%s'\''")\n' \
+  printf 'o.bind("%s", "Workspace overview", "omarchy-shell shell summon %s '\''%s'\''")\n' \
     "$OVERVIEW_KEY" "$PLUGIN_ID" "${OVERVIEW_PAYLOAD//\"/\\\"}"
 }
 
@@ -907,6 +909,70 @@ cmd_bind_overview() {
   say "Bound the workspace overview to $OVERVIEW_KEY in $BINDINGS"
 }
 
+# ── the shortcut, as the editor shows it ─────────────────────────────────────
+#
+# Read from the files, like overview_key_taken and for the same reason, and
+# from wherever the line has been moved to since. A `code:N` key is named by
+# what the current layout prints on it: `code:49` means nothing to anyone, and
+# `½` or `` ` `` is the key under your finger.
+
+keysym_char() {
+  case $1 in
+    grave | dead_grave) echo '`' ;;
+    asciitilde) echo '~' ;;
+    onehalf) echo '½' ;;
+    section) echo '§' ;;
+    twosuperior) echo '²' ;;
+    asciicircum | dead_circumflex) echo '^' ;;
+    degree) echo '°' ;;
+    apostrophe) echo "'" ;;
+    bar) echo '|' ;;
+    less) echo '<' ;;
+    minus) echo '-' ;;
+    equal) echo '=' ;;
+    ?) echo "${1^^}" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+# The main keyboard's layout, from Hyprland. OMARCHY_WORKSPACES_XKB_LAYOUT
+# stands in for it where there is no Hyprland to ask.
+keycode_label() {
+  local code=$1 layout variant keymap name sym
+  layout=${OMARCHY_WORKSPACES_XKB_LAYOUT:-$(hyprctl devices -j 2>/dev/null |
+    jq -r '[.keyboards[] | select(.main)][0].layout // empty' 2>/dev/null || true)}
+  variant=${OMARCHY_WORKSPACES_XKB_VARIANT-$(hyprctl devices -j 2>/dev/null |
+    jq -r '[.keyboards[] | select(.main)][0].variant // empty' 2>/dev/null || true)}
+  if [[ -z $layout ]] || ! command -v xkbcli >/dev/null; then
+    echo "code:$code"
+    return
+  fi
+  keymap=$(xkbcli compile-keymap --layout "${layout%%,*}" ${variant:+--variant "${variant%%,*}"} 2>/dev/null || true)
+  # `<TLDE> = 49;` in the keycodes, then `key <TLDE> { [ onehalf, ...` in the
+  # symbols. The first symbol is the unshifted one, which is what is printed.
+  name=$(awk -v c="$code" '$0 ~ "= " c ";" && match($0, /<[^>]+>/) { print substr($0, RSTART, RLENGTH); exit }' <<<"$keymap")
+  sym=$(awk -v n="key $name" 'n != "key " && index($0, n) && match($0, /\[[ \t]*[A-Za-z_][A-Za-z0-9_]*[ \t]*[,\]]/) {
+    s = substr($0, RSTART + 1, RLENGTH - 2); gsub(/[ \t]/, "", s); print s; exit }' <<<"$keymap")
+  if [[ -n $sym ]]; then keysym_char "$sym"; else echo "code:$code"; fi
+}
+
+cmd_overview_key() {
+  local line keys part out=()
+  line=$(grep -hsE "^o\.bind\(.*${PLUGIN_ID//./\\.} .*overview" "$(dirname "$BINDINGS")"/*.lua | head -1 || true)
+  keys=$(sed -E 's/^o\.bind\(\s*"([^"]*)".*/\1/' <<<"$line")
+  [[ -n $line && -n $keys ]] || return 1
+  IFS='+' read -ra parts <<<"$keys"
+  for part in "${parts[@]}"; do
+    part=${part#"${part%%[![:space:]]*}"}
+    part=${part%"${part##*[![:space:]]}"}
+    [[ $part =~ ^code:([0-9]+)$ ]] && part=$(keycode_label "${BASH_REMATCH[1]}")
+    out+=("$part")
+  done
+  printf '%s' "${out[0]}"
+  printf ' + %s' "${out[@]:1}"
+  echo
+}
+
 usage() {
   cat <<'USAGE'
 omarchy-workspaces — pin Hyprland workspaces to specific monitors
@@ -914,6 +980,7 @@ omarchy-workspaces — pin Hyprland workspaces to specific monitors
   open                             Open the visual editor overlay
   overview                         Show every workspace full screen, or hide it
   bind-overview [--force]          Bind the overview to SUPER + the key left of 1
+  overview-key                     Print the overview's shortcut as your keyboard labels it
   bootstrap                        Seed config + rules if missing, sync if not
   detect [--force] [--count=N]     Build a config from the connected monitors
   list                             Show the layout
@@ -957,6 +1024,7 @@ main() {
     edit)     cmd_edit ;;
     open)     cmd_open ;;
     overview) cmd_overview ;;
+    overview-key) cmd_overview_key ;;
     bind-overview)
       cmd_bind_overview ||
         say "Nothing to bind: it is bound already, its key is taken, or it was removed (--force brings it back)." ;;

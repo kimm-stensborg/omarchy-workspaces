@@ -164,8 +164,8 @@ B=$(cat "$WORK/hypr/bindings.lua")
 has "writes the block under the plugin's own comment" "$B" \
   "-- Workspaces per Monitor (io.github.kimm-stensborg.workspaces)"
 has "binds the key left of 1 by position" "$B" 'o.bind("SUPER + code:49", "Workspace overview",'
-has "toggles the overview, payload escaped for Lua" "$B" \
-  "toggle io.github.kimm-stensborg.workspaces '{\\\"view\\\":\\\"overview\\\"}'\")"
+has "summons the overview, payload escaped for Lua" "$B" \
+  "summon io.github.kimm-stensborg.workspaces '{\\\"view\\\":\\\"overview\\\"}'\")"
 has "leaves what was there alone" "$B" "-- mine"
 is "ends on a newline, so the next append gets its own line" \
   "$(tail -c1 "$WORK/hypr/bindings.lua" | od -An -c | tr -d ' ')" '\n'
@@ -177,7 +177,7 @@ PM=$(grep 'o\.bind(' "$WORK/hypr/bindings.lua" | jq -Rr '
   capture("^\\s*o\\.bind\\(\\s*\"(?<keys>[^\"]*)\"\\s*,\\s*\"(?<d>[^\"]*)\"\\s*,\\s*\"(?<c>(\\\\.|[^\"\\\\])*)\"")
   | .c | gsub("\\\\(?<x>.)"; .x)')
 is "Plugin Manager reads back the real command" "$PM" \
-  "omarchy-shell shell toggle io.github.kimm-stensborg.workspaces '{\"view\":\"overview\"}'"
+  "omarchy-shell shell summon io.github.kimm-stensborg.workspaces '{\"view\":\"overview\"}'"
 
 sed -i '/Workspaces per Monitor/,+1d' "$WORK/hypr/bindings.lua"
 bind >/dev/null
@@ -203,6 +203,22 @@ if command -v luac >/dev/null; then
   fresh; bind >/dev/null
   luac -p "$WORK/hypr/bindings.lua" 2>/dev/null && ok "the block is valid Lua" || no "the block is valid Lua" "parses" "syntax error"
 fi
+
+echo
+echo "the overview shortcut, as the editor shows it"
+key() { OMARCHY_WORKSPACES_XKB_LAYOUT=$1 OMARCHY_WORKSPACES_XKB_VARIANT= \
+  OMARCHY_WORKSPACES_BINDINGS="$WORK/hypr/bindings.lua" bash "$CLI" overview-key 2>&1; }
+fresh; bind >/dev/null
+if command -v xkbcli >/dev/null; then
+  is "code:49 is ½ on a Danish keyboard" "$(key dk)" 'SUPER + ½'
+  is "and \` on a US one"                "$(key us)" 'SUPER + `'
+else
+  printf '  - skipped: xkbcli not installed (2 checks)\n'
+fi
+sed -i 's/SUPER + code:49/SUPER + ALT + W/' "$WORK/hypr/bindings.lua"
+is "a key moved since is read from the file" "$(key us)" 'SUPER + ALT + W'
+printf -- '-- mine\n' >"$WORK/hypr/bindings.lua"
+is "no shortcut, nothing printed"            "$(key us)" ''
 
 echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"

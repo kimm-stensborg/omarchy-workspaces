@@ -210,6 +210,14 @@ BarWidget {
     root.bar.run("hyprctl dispatch " + Util.shellQuote("hl.dsp.focus({ workspace = \"" + id + "\" })"))
   }
 
+  // Opens on this bar's screen, which is the one you were looking at when you
+  // reached for it — focus has not necessarily followed the pointer there yet.
+  function toggleOverview() {
+    var shell = root.bar ? root.bar.shell : null
+    if (!shell || typeof shell.toggle !== "function") return
+    shell.toggle(root.moduleName, JSON.stringify({ view: "overview", screen: root.screenName }))
+  }
+
   // ── layout ────────────────────────────────────────────────────────────────
 
   readonly property real trailingGap: root.ids.length === 0
@@ -222,7 +230,8 @@ BarWidget {
     id: grid
     anchors.fill: parent
     anchors.rightMargin: root.trailingGap
-    columns: root.vertical ? 1 : Math.max(1, root.ids.length)
+    // One more for the overview button after the workspaces.
+    columns: root.vertical ? 1 : root.ids.length + 1
     columnSpacing: root.vertical ? 0 : Style.space(1)
     rowSpacing: root.vertical ? Style.space(2) : 0
 
@@ -244,6 +253,17 @@ BarWidget {
         fixedHeight: root.barSize
         onPressed: function () { root.focusWorkspace(modelData) }
       }
+    }
+
+    WidgetButton {
+      bar: root.bar
+      text: "󰖳"
+      tooltipText: "All workspaces"
+      horizontalMargin: 6
+      verticalPadding: 6
+      fixedWidth: root.vertical ? root.barSize : Style.space(20)
+      fixedHeight: root.barSize
+      onPressed: function () { root.toggleOverview() }
     }
   }
 }

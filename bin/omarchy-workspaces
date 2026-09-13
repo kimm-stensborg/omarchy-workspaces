@@ -26,6 +26,17 @@ GENERATED="${OMARCHY_WORKSPACES_LUA:-$HOME/.config/hypr/workspaces.lua}"
 KEY_SLOTS=10
 QUIET=0
 
+# The overview's shortcut goes in your bindings.lua, once, where Plugin Manager
+# can see it and you can move it; see bind-overview.
+BINDINGS="${OMARCHY_WORKSPACES_BINDINGS:-$HOME/.config/hypr/bindings.lua}"
+STATE_DIR="${OMARCHY_WORKSPACES_STATE:-$HOME/.local/state/omarchy-workspaces}"
+
+# The key left of 1, named by position rather than by keysym: it is ` on a US
+# layout and ½ on a Danish one, and a keysym would move with the layout. The
+# workspace keys are bound the same way (1 is code:10).
+OVERVIEW_KEY="SUPER + code:49"
+OVERVIEW_PAYLOAD='{"view":"overview"}'
+
 die() { echo "omarchy-workspaces: $*" >&2; exit 1; }
 say() { ((QUIET)) || echo "$@"; }
 
@@ -625,6 +636,7 @@ cmd_bootstrap() {
   [[ $before == "$(cat "$GENERATED")" ]] || changed=1
 
   ensure_required && changed=1
+  cmd_bind_overview && changed=1
 
   if ((changed)); then
     reload_hyprland
@@ -831,11 +843,77 @@ cmd_open() {
     die "could not summon the overlay (is omarchy-shell running?)"
 }
 
+# Toggle rather than summon, so the key that opens the overview also closes it.
+cmd_overview() {
+  omarchy-shell shell toggle "$PLUGIN_ID" "$OVERVIEW_PAYLOAD" >/dev/null 2>&1 ||
+    die "could not open the overview (is omarchy-shell running?)"
+}
+
+# ── the overview shortcut ────────────────────────────────────────────────────
+#
+# Offered once, not enforced. The first bootstrap writes one o.bind block to
+# bindings.lua, under the `-- Name (<id>)` comment Plugin Manager takes for a
+# plugin's own binding, so it can be moved or removed there like any other. A
+# flag in the state directory records that the offer was made: a removal has to
+# stick, and without the flag the next shell start would put it straight back.
+# `bind-overview --force` makes the offer again.
+#
+# Returns 0 only when it wrote something, so bootstrap knows to reload.
+
+overview_bind_line() {
+  printf 'o.bind("%s", "Workspace overview", "omarchy-shell shell toggle %s '\''%s'\''")\n' \
+    "$OVERVIEW_KEY" "$PLUGIN_ID" "${OVERVIEW_PAYLOAD//\"/\\\"}"
+}
+
+# Hyprland cannot say what holds a key here: with a Lua config, `hyprctl binds`
+# reports every binding with an empty key, Omarchy's own SUPER+1..0 included.
+# So the files are asked instead — yours next to bindings.lua, and Omarchy's
+# defaults — for a binding of SUPER alone on this key, by position or by name.
+overview_key_taken() {
+  #
+  # Only files that exist go to grep. A glob that matches nothing stays a
+  # literal path, and grep exits 2 for a missing file even after a match in
+  # another, so a taken key would read as free.
+  local files=() file
+  for file in "$(dirname "$BINDINGS")"/*.lua "${OMARCHY_PATH:-/usr/share/omarchy}"/default/hypr/*.lua; do
+    [[ -f $file ]] && files+=("$file")
+  done
+  ((${#files[@]})) || return 1
+  grep -qiE '^\s*(o|hl)\.bind\(\s*"SUPER\s*\+\s*(code:49|grave)\s*"' "${files[@]}"
+}
+
+cmd_bind_overview() {
+  local flag="$STATE_DIR/overview-key"
+  [[ -f $BINDINGS ]] || return 1
+  mkdir -p "$STATE_DIR"
+
+  # Already there, under whatever key it has been moved to since.
+  if grep -qE "^o\.bind\(.*${PLUGIN_ID//./\\.} .*overview" "$BINDINGS"; then
+    touch "$flag"
+    return 1
+  fi
+  [[ -e $flag ]] && ! ((${FORCE:-0})) && return 1
+
+  touch "$flag"
+  if overview_key_taken; then
+    echo "omarchy-workspaces: $OVERVIEW_KEY is taken, so the overview has no shortcut." >&2
+    echo "omarchy-workspaces: give it one with Plugin Manager, or bind 'omarchy-workspaces overview'." >&2
+    return 1
+  fi
+
+  # The newline after the line is ours to add: $(...) strips it, and without
+  # it the next thing appended to the file lands on the same line.
+  printf '\n-- Workspaces per Monitor (%s)\n%s\n' "$PLUGIN_ID" "$(overview_bind_line)" >>"$BINDINGS"
+  say "Bound the workspace overview to $OVERVIEW_KEY in $BINDINGS"
+}
+
 usage() {
   cat <<'USAGE'
 omarchy-workspaces — pin Hyprland workspaces to specific monitors
 
   open                             Open the visual editor overlay
+  overview                         Show every workspace full screen, or hide it
+  bind-overview [--force]          Bind the overview to SUPER + the key left of 1
   bootstrap                        Seed config + rules if missing, sync if not
   detect [--force] [--count=N]     Build a config from the connected monitors
   list                             Show the layout
@@ -878,6 +956,10 @@ main() {
     apply)    cmd_apply ;;
     edit)     cmd_edit ;;
     open)     cmd_open ;;
+    overview) cmd_overview ;;
+    bind-overview)
+      cmd_bind_overview ||
+        say "Nothing to bind: it is bound already, its key is taken, or it was removed (--force brings it back)." ;;
     set-layout) shift; cmd_set_layout "$@" ;;
     -h|--help|help) usage ;;
     *) usage; exit 1 ;;

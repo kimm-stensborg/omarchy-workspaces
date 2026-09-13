@@ -151,5 +151,59 @@ printf '{"version":2,"monitors":{}}' >"$WORK/ws.json"
 has "a future version is refused" "$(run list)" "not a version 1 config"
 
 echo
+echo "the overview shortcut"
+# Whether the key is free is read from the files, so the test owns the files:
+# its own bindings.lua, and an empty stand-in for Omarchy's defaults.
+mkdir -p "$WORK/hypr" "$WORK/omarchy/default/hypr"
+bind() { OMARCHY_PATH="$WORK/omarchy" OMARCHY_WORKSPACES_BINDINGS="$WORK/hypr/bindings.lua" \
+  OMARCHY_WORKSPACES_STATE="$WORK/bstate" bash "$CLI" bind-overview "$@" 2>&1; }
+fresh() { rm -rf "$WORK/bstate"; printf -- '-- mine\n' >"$WORK/hypr/bindings.lua"; }
+
+fresh; bind >/dev/null
+B=$(cat "$WORK/hypr/bindings.lua")
+has "writes the block under the plugin's own comment" "$B" \
+  "-- Workspaces per Monitor (io.github.kimm-stensborg.workspaces)"
+has "binds the key left of 1 by position" "$B" 'o.bind("SUPER + code:49", "Workspace overview",'
+has "toggles the overview, payload escaped for Lua" "$B" \
+  "toggle io.github.kimm-stensborg.workspaces '{\\\"view\\\":\\\"overview\\\"}'\")"
+has "leaves what was there alone" "$B" "-- mine"
+is "ends on a newline, so the next append gets its own line" \
+  "$(tail -c1 "$WORK/hypr/bindings.lua" | od -An -c | tr -d ' ')" '\n'
+bind >/dev/null
+is "a second run adds nothing" "$(grep -c 'o.bind' "$WORK/hypr/bindings.lua")" '1'
+
+# What Plugin Manager reads: the same capture it uses on bindings.lua.
+PM=$(grep 'o\.bind(' "$WORK/hypr/bindings.lua" | jq -Rr '
+  capture("^\\s*o\\.bind\\(\\s*\"(?<keys>[^\"]*)\"\\s*,\\s*\"(?<d>[^\"]*)\"\\s*,\\s*\"(?<c>(\\\\.|[^\"\\\\])*)\"")
+  | .c | gsub("\\\\(?<x>.)"; .x)')
+is "Plugin Manager reads back the real command" "$PM" \
+  "omarchy-shell shell toggle io.github.kimm-stensborg.workspaces '{\"view\":\"overview\"}'"
+
+sed -i '/Workspaces per Monitor/,+1d' "$WORK/hypr/bindings.lua"
+bind >/dev/null
+is "a removed shortcut stays removed" "$(grep -c 'o.bind' "$WORK/hypr/bindings.lua")" '0'
+bind --force >/dev/null
+is "--force offers it again" "$(grep -c 'o.bind' "$WORK/hypr/bindings.lua")" '1'
+
+fresh; printf 'o.bind("SUPER + GRAVE", "Mine", "foot")\n' >>"$WORK/hypr/bindings.lua"
+has "a key bound by name is not taken over" "$(bind)" "is taken"
+is "and nothing is written" "$(grep -c 'overview' "$WORK/hypr/bindings.lua")" '0'
+fresh; printf 'o.bind("SUPER + code:49", "Theirs", "foot")\n' >"$WORK/omarchy/default/hypr/bindings.lua"
+has "nor one Omarchy binds by position" "$(bind)" "is taken"
+rm -f "$WORK/omarchy/default/hypr/bindings.lua"
+fresh; printf 'o.bind("SUPER + SHIFT + GRAVE", "Mine", "foot")\n' >>"$WORK/hypr/bindings.lua"
+bind >/dev/null
+is "SUPER + SHIFT on the same key is no conflict" "$(grep -c 'Workspace overview' "$WORK/hypr/bindings.lua")" '1'
+
+rm -rf "$WORK/bstate" "$WORK/hypr/bindings.lua"
+bind >/dev/null
+is "no bindings.lua, no new file" "$([[ -e $WORK/hypr/bindings.lua ]] && echo made || echo none)" 'none'
+
+if command -v luac >/dev/null; then
+  fresh; bind >/dev/null
+  luac -p "$WORK/hypr/bindings.lua" 2>/dev/null && ok "the block is valid Lua" || no "the block is valid Lua" "parses" "syntax error"
+fi
+
+echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

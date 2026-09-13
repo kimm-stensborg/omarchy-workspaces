@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.kimm-stensborg.workspaces",
   "name": "Workspaces per Monitor",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "Kimm Stensborg",
   "license": "MIT",
-  "description": "Pins workspaces to monitors, shows each monitor its own workspaces in the bar, and rearranges the monitors by drag",
+  "description": "Pins workspaces to monitors, shows each monitor its own workspaces in the bar, and previews every workspace full screen",
   "kinds": [
     "bar-widget",
     "overlay",
@@ -18,7 +18,7 @@
   },
   "barWidget": {
     "displayName": "Workspaces per Monitor",
-    "description": "Workspace indicators filtered to the monitor the bar is on",
+    "description": "Workspace indicators filtered to the monitor the bar is on, with a button for the full-screen overview",
     "category": "Compositor",
     "allowMultiple": false,
     "defaultSection": "left"

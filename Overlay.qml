@@ -89,7 +89,24 @@ Item {
 
   // ── lifecycle ─────────────────────────────────────────────────────────────
 
+  // The same overlay is two things: the editor, and the overview that the bar
+  // button and the shortcut open. The payload says which, so `{}` — what every
+  // existing menu entry and binding sends — still means the editor.
+  property string view: "editor"
+
   function open(payloadJson) {
+    var payload = ({})
+    try {
+      payload = JSON.parse(String(payloadJson || "{}")) || ({})
+    } catch (error) {
+      console.warn(root.pluginId, "ignoring unreadable payload", payloadJson)
+    }
+    if (payload.view === "overview") {
+      root.openOverview(String(payload.screen || ""))
+      return
+    }
+
+    root.view = "editor"
     reloadFromDisk()
     // After `opened`, not before: `monitors` reads as empty until then, and a
     // spread across no monitors is a silent no-op.
@@ -134,7 +151,7 @@ Item {
   // decided only once there is a config to judge — otherwise "this layout
   // assigns nothing" and "the file has not been read yet" look identical.
   onConfigChanged: {
-    if (root.opened && !root.dirty) {
+    if (root.opened && root.view === "editor" && !root.dirty) {
       root.reloadFromDisk()
       root.spreadIfUnassigned()
     }
@@ -548,7 +565,7 @@ Item {
 
   PanelWindow {
     id: panel
-    visible: root.opened
+    visible: root.opened && root.view === "editor"
     anchors { top: true; bottom: true; left: true; right: true }
     color: "transparent"
     WlrLayershell.namespace: "omarchy-workspaces-editor"
@@ -782,6 +799,287 @@ Item {
     }
   }
 
+  // ── the overview ──────────────────────────────────────────────────────────
+  //
+  // Every workspace at once, full screen, on the monitor you are looking at:
+  // one row per monitor, a tile per workspace, and in each tile its windows
+  // where they really sit, as live thumbnails. Click one, or press its number,
+  // and you are there.
+  //
+  // It draws what Hyprland has rather than what the config asks for. The two
+  // agree once the rules have settled, and when they do not, a picture you
+  // navigate by has to show where things are, not where they should be.
+
+  readonly property bool overviewShown: root.opened && root.view === "overview"
+
+  // A PanelWindow takes a Quickshell screen, not an output name, so the name
+  // is resolved once at open time.
+  property var overviewScreen: null
+  property int overviewSelected: 0
+
+  function screenFor(name) {
+    var screens = Quickshell.screens
+    for (var i = 0; i < screens.length; i++) {
+      var hypr = typeof Hyprland.monitorFor === "function" ? Hyprland.monitorFor(screens[i]) : null
+      var candidate = hypr && hypr.name ? String(hypr.name) : String(screens[i].name || "")
+      if (candidate === name) return screens[i]
+    }
+    return screens.length > 0 ? screens[0] : null
+  }
+
+  // The bar button says which screen it was clicked on. A key says nothing,
+  // and then the focused monitor is the one you are looking at.
+  function openOverview(screenName) {
+    // Window positions come from Hyprland's last report, which can be as old
+    // as the last event the shell happened to receive. Asking again is cheap,
+    // and the tiles move into place when the answer lands.
+    Hyprland.refreshMonitors()
+    Hyprland.refreshWorkspaces()
+    Hyprland.refreshToplevels()
+
+    var name = screenName
+      || (Hyprland.focusedMonitor ? String(Hyprland.focusedMonitor.name || "") : "")
+    root.overviewScreen = root.screenFor(name)
+    root.overviewSelected = Hyprland.focusedWorkspace ? Hyprland.focusedWorkspace.id : 0
+    root.view = "overview"
+    root.opened = true
+    Qt.callLater(function () { overviewKeys.forceActiveFocus() })
+  }
+
+  // A monitor's size in the units Hyprland positions windows in: the mode
+  // divided by the scale, turned on its side for a rotated panel. Measured in
+  // mode pixels instead, a scaled screen would draw its windows too small and
+  // in the wrong place.
+  function logicalSize(monitor) {
+    var ipc = monitor.lastIpcObject || {}
+    var scale = Number(monitor.scale || ipc.scale) || 1
+    var width = (Number(monitor.width) || 1920) / scale
+    var height = (Number(monitor.height) || 1080) / scale
+    return (Number(ipc.transform) || 0) % 2 === 1
+      ? { width: height, height: width }
+      : { width: width, height: height }
+  }
+
+  // One row per monitor, left to right, holding the workspaces Hyprland has
+  // on it. Special workspaces (negative ids) are scratchpads, not places, and
+  // a monitor with nothing on it gets no row.
+  readonly property var overviewRows: {
+    if (!root.overviewShown) return []
+    var monitors = []
+    var values = Hyprland.monitors ? Hyprland.monitors.values : []
+    for (var i = 0; i < values.length; i++) monitors.push(values[i])
+    monitors.sort(function (left, right) { return (left.x - right.x) || (left.y - right.y) })
+
+    var workspaces = root.hyprWorkspaces
+    var rows = []
+    for (var m = 0; m < monitors.length; m++) {
+      var monitor = monitors[m]
+      var ids = []
+      for (var w = 0; w < workspaces.length; w++) {
+        var workspace = workspaces[w]
+        if (workspace.id > 0 && workspace.monitor && workspace.monitor.name === monitor.name)
+          ids.push(workspace.id)
+      }
+      if (ids.length === 0) continue
+      ids.sort(function (a, b) { return a - b })
+      var size = root.logicalSize(monitor)
+      rows.push({ name: String(monitor.name), x: monitor.x, y: monitor.y,
+                  width: size.width, height: size.height, workspaces: ids })
+    }
+    return rows
+  }
+
+  readonly property var hyprWorkspaces: Hyprland.workspaces ? Hyprland.workspaces.values : []
+
+  function liveWorkspace(id) {
+    var values = root.hyprWorkspaces
+    for (var i = 0; i < values.length; i++) if (values[i].id === id) return values[i]
+    return null
+  }
+
+  // Shown on its monitor right now, focused or not.
+  function isShown(id) {
+    var values = Hyprland.monitors ? Hyprland.monitors.values : []
+    for (var i = 0; i < values.length; i++) {
+      if (values[i].activeWorkspace && values[i].activeWorkspace.id === id) return true
+    }
+    return false
+  }
+
+  // Tiled windows first and floating ones over them, each group oldest-focused
+  // first, so the window you used last ends up on top — as it is on screen.
+  // A window hidden inside a group has no place of its own to draw.
+  function windowsOn(workspace) {
+    var out = []
+    var values = workspace && workspace.toplevels ? workspace.toplevels.values : []
+    for (var i = 0; i < values.length; i++) {
+      var ipc = values[i].lastIpcObject || {}
+      if (ipc.hidden || !ipc.size) continue
+      out.push(values[i])
+    }
+    out.sort(function (left, right) {
+      var a = left.lastIpcObject, b = right.lastIpcObject
+      return ((a.floating ? 1 : 0) - (b.floating ? 1 : 0))
+        || ((Number(b.focusHistoryID) || 0) - (Number(a.focusHistoryID) || 0))
+    })
+    return out
+  }
+
+  function overviewPosition(id) {
+    var rows = root.overviewRows
+    for (var r = 0; r < rows.length; r++) {
+      var column = rows[r].workspaces.indexOf(id)
+      if (column !== -1) return { row: r, column: column }
+    }
+    return { row: 0, column: -1 }
+  }
+
+  // Left and right run on into the next row, so every tile is reachable with
+  // two keys; up and down keep the column as far as the row is long.
+  function moveSelection(rowStep, columnStep) {
+    var rows = root.overviewRows
+    if (rows.length === 0) return
+    var at = root.overviewPosition(root.overviewSelected)
+    var row = at.row
+    var column = at.column + columnStep
+    if (column < 0 && row > 0 && columnStep !== 0) {
+      row--
+      column = rows[row].workspaces.length - 1
+    } else if (column >= rows[row].workspaces.length && row < rows.length - 1) {
+      row++
+      column = 0
+    }
+    row = Math.max(0, Math.min(rows.length - 1, row + rowStep))
+    column = Math.max(0, Math.min(rows[row].workspaces.length - 1, column))
+    root.overviewSelected = rows[row].workspaces[column]
+  }
+
+  // The same dispatch the bar uses. A pinned workspace takes focus to its own
+  // monitor rather than coming to this one, which is the plugin working.
+  function jumpTo(id) {
+    if (root.overviewPosition(id).column === -1) return
+    Quickshell.execDetached(["hyprctl", "dispatch", "hl.dsp.focus({ workspace = \"" + id + "\" })"])
+    root.dismiss()
+  }
+
+  PanelWindow {
+    id: overviewPanel
+    visible: root.overviewShown
+    screen: root.overviewScreen
+    anchors { top: true; bottom: true; left: true; right: true }
+    color: "transparent"
+    WlrLayershell.namespace: "omarchy-workspaces-overview"
+    WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
+    exclusionMode: ExclusionMode.Ignore
+
+    readonly property real margin: Style.space(56)
+    readonly property real rowGap: Style.space(28)
+    readonly property real tileGap: Style.space(16)
+    readonly property real labelHeight: Style.font.bodySmall * 1.5 + Style.spacing.sm
+    readonly property real hintHeight: Style.font.caption * 1.5 + Style.spacing.md
+
+    // One height for every tile, each as wide as its monitor's shape: the
+    // largest that lets the rows stack and the longest row fit. Two
+    // workspaces on a big screen would otherwise fill it, and past a point a
+    // bigger tile is not a clearer one.
+    readonly property real tileHeight: {
+      var rows = root.overviewRows
+      if (rows.length === 0) return 0
+      var availableWidth = width - margin * 2
+      var availableHeight = height - margin * 2 - hintHeight
+      var best = (availableHeight - rows.length * labelHeight - (rows.length - 1) * rowGap) / rows.length
+      for (var i = 0; i < rows.length; i++) {
+        var count = rows[i].workspaces.length
+        var aspect = rows[i].width / rows[i].height
+        best = Math.min(best, (availableWidth - (count - 1) * tileGap) / (count * aspect))
+      }
+      return Math.max(Style.space(48), Math.min(best, availableHeight * 0.3))
+    }
+
+    // Nearly opaque, not the editor's scrim. The scrim dims a desktop you are
+    // meant to still see; here the desktop behind would be read as part of
+    // the picture, and every thumbnail would compete with the real windows.
+    Rectangle {
+      anchors.fill: parent
+      color: Qt.rgba(root.background.r, root.background.g, root.background.b, 0.94)
+    }
+    MouseArea { anchors.fill: parent; onClicked: root.dismiss() }
+
+    Item {
+      id: overviewKeys
+      anchors.fill: parent
+      focus: true
+      Keys.priority: Keys.BeforeItem
+      Keys.onPressed: function (event) {
+        var key = event.key
+        if (key === Qt.Key_Escape) root.dismiss()
+        else if (key === Qt.Key_Return || key === Qt.Key_Enter || key === Qt.Key_Space)
+          root.jumpTo(root.overviewSelected)
+        else if (key === Qt.Key_Left || key === Qt.Key_H) root.moveSelection(0, -1)
+        else if (key === Qt.Key_Right || key === Qt.Key_L) root.moveSelection(0, 1)
+        else if (key === Qt.Key_Up || key === Qt.Key_K) root.moveSelection(-1, 0)
+        else if (key === Qt.Key_Down || key === Qt.Key_J) root.moveSelection(1, 0)
+        else if (event.text.length === 1 && event.text >= "0" && event.text <= "9")
+          root.jumpTo(event.text === "0" ? root.keySlots : parseInt(event.text))
+        else return
+        event.accepted = true
+      }
+    }
+
+    Column {
+      anchors.centerIn: parent
+      anchors.verticalCenterOffset: -overviewPanel.hintHeight / 2
+      spacing: overviewPanel.rowGap
+
+      Repeater {
+        model: root.overviewRows
+
+        Column {
+          id: overviewRow
+          required property var modelData
+          spacing: Style.spacing.sm
+
+          Text {
+            height: overviewPanel.labelHeight - Style.spacing.sm
+            verticalAlignment: Text.AlignBottom
+            text: overviewRow.modelData.name
+            color: root.foreground
+            opacity: 0.7
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            textFormat: Text.PlainText
+          }
+
+          Row {
+            spacing: overviewPanel.tileGap
+
+            Repeater {
+              model: overviewRow.modelData.workspaces
+              WorkspaceTile {
+                ui: root
+                monitor: overviewRow.modelData
+                height: overviewPanel.tileHeight
+              }
+            }
+          }
+        }
+      }
+    }
+
+    Text {
+      anchors.horizontalCenter: parent.horizontalCenter
+      anchors.bottom: parent.bottom
+      anchors.bottomMargin: overviewPanel.margin / 2
+      text: "Click or press 1–0 to go there  ·  arrows and Enter  ·  Esc to close"
+      color: root.foreground
+      opacity: 0.45
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      textFormat: Text.PlainText
+    }
+  }
+
   // ── pieces ────────────────────────────────────────────────────────────────
 
   component WorkspaceChip: Rectangle {
@@ -873,6 +1171,128 @@ Item {
 
       onCanceled: chip.ui.cancelDrag()
     }
+  }
+
+  // One workspace in the overview: its monitor's shape, its windows where they
+  // sit, and its number in the corner.
+  component WorkspaceTile: Rectangle {
+    id: tile
+
+    required property int modelData
+    required property var ui
+    // The row it belongs to: the monitor's name, position and logical size.
+    required property var monitor
+
+    readonly property var workspace: ui.liveWorkspace(modelData)
+    readonly property var windows: ui.windowsOn(workspace)
+    readonly property bool focused: Hyprland.focusedWorkspace !== null
+      && Hyprland.focusedWorkspace.id === modelData
+    readonly property bool shown: ui.isShown(modelData)
+    readonly property bool selected: ui.overviewSelected === modelData
+    readonly property real unit: height / monitor.height
+
+    width: height * monitor.width / monitor.height
+    radius: Style.cornerRadius
+    clip: true
+    color: Qt.rgba(ui.foreground.r, ui.foreground.g, ui.foreground.b, tileHover.hovered ? 0.12 : 0.06)
+    border.width: selected ? 2 : 1
+    border.color: selected ? ui.accent
+      : Qt.rgba(ui.foreground.r, ui.foreground.g, ui.foreground.b, shown ? 0.5 : 0.2)
+
+    // An empty workspace is still a place you can go, so it keeps its number
+    // where the windows would be.
+    Text {
+      visible: tile.windows.length === 0
+      anchors.centerIn: parent
+      text: tile.ui.keyLabel(tile.modelData)
+      color: tile.ui.foreground
+      opacity: 0.25
+      font.family: tile.ui.fontFamily
+      font.pixelSize: Math.max(Style.font.subtitle, tile.height * 0.3)
+      textFormat: Text.PlainText
+    }
+
+    Repeater {
+      model: tile.windows
+
+      Item {
+        id: shotFrame
+        required property var modelData
+        readonly property var ipc: modelData.lastIpcObject || ({})
+        readonly property var at: ipc.at || [0, 0]
+        readonly property var size: ipc.size || [0, 0]
+
+        x: (at[0] - tile.monitor.x) * tile.unit
+        y: (at[1] - tile.monitor.y) * tile.unit
+        width: Math.max(1, size[0] * tile.unit)
+        height: Math.max(1, size[1] * tile.unit)
+
+        // Until the first frame arrives, and for anything that cannot be
+        // captured, the window's class stands in for it.
+        Rectangle {
+          visible: !shot.hasContent
+          anchors.fill: parent
+          radius: Math.max(2, Style.cornerRadius / 2)
+          color: Qt.rgba(tile.ui.foreground.r, tile.ui.foreground.g, tile.ui.foreground.b, 0.1)
+          border.width: 1
+          border.color: Qt.rgba(tile.ui.foreground.r, tile.ui.foreground.g, tile.ui.foreground.b, 0.2)
+
+          Text {
+            anchors.fill: parent
+            anchors.margins: Style.spacing.xxs
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+            text: String(shotFrame.ipc.class || shotFrame.modelData.title || "")
+            color: tile.ui.foreground
+            opacity: 0.6
+            font.family: tile.ui.fontFamily
+            font.pixelSize: Style.font.caption
+            textFormat: Text.PlainText
+            elide: Text.ElideRight
+          }
+        }
+
+        ScreencopyView {
+          id: shot
+          anchors.fill: parent
+          captureSource: tile.ui.overviewShown ? shotFrame.modelData.wayland : null
+          live: true
+        }
+      }
+    }
+
+    // The number, over the windows, so a full workspace is still findable.
+    Rectangle {
+      visible: tile.windows.length > 0
+      anchors.top: parent.top
+      anchors.left: parent.left
+      anchors.margins: Style.spacing.sm
+      width: Math.max(number.implicitWidth + Style.spacing.sm * 2, height)
+      height: number.implicitHeight + Style.spacing.xxs * 2
+      radius: Style.cornerRadius
+      color: tile.ui.background
+      border.width: 1
+      border.color: tile.focused ? tile.ui.accent : tile.ui.hairline
+
+      Text {
+        id: number
+        anchors.centerIn: parent
+        text: tile.ui.keyLabel(tile.modelData)
+        color: tile.focused ? tile.ui.accent : tile.ui.foreground
+        font.family: tile.ui.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        textFormat: Text.PlainText
+      }
+    }
+
+    // Hovering selects, so the mouse and the arrow keys never disagree about
+    // which tile Enter would take you to.
+    HoverHandler {
+      id: tileHover
+      cursorShape: Qt.PointingHandCursor
+      onHoveredChanged: if (hovered) tile.ui.overviewSelected = tile.modelData
+    }
+    TapHandler { onTapped: tile.ui.jumpTo(tile.modelData) }
   }
 
   component OverlayButton: Rectangle {

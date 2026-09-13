@@ -62,6 +62,38 @@ available, so `omarchy plugin enable omarchy.workspaces` puts it back.
   `DP-5` and `DP-7` swap after a reboot or a dock reconnect.
 - **Survives undocking.** A monitor that is not plugged in has its workspaces
   reflow onto the nearest one that is, and get them back when it returns.
+- **Shows them all at once.** A full-screen overview of every workspace, with
+  live window thumbnails, from a bar button or `SUPER` + the key left of `1`.
+
+## The overview
+
+Every workspace at once, full screen, on whichever monitor you are on. Each
+monitor gets a row, each workspace a tile the shape of its monitor, and in each
+tile its windows sit where they really are, as live thumbnails.
+
+- **Click** a tile, or press its number (`0` is workspace 10), to go there.
+- **Arrow keys** (or `h` `j` `k` `l`) move the selection, and **Enter** goes.
+  Hovering a tile selects it too.
+- **`Esc`**, a click outside the tiles, or the shortcut again closes it.
+
+Open it with the **󰖳** button after the workspaces in the bar, or with
+**`SUPER` + the key left of `1`** (`` ` `` on a US keyboard, `½` on a Nordic
+one). The first time the service runs, it writes that shortcut to
+`~/.config/hypr/bindings.lua`, if the key is free:
+
+```lua
+-- Workspaces per Monitor (io.github.kimm-stensborg.workspaces)
+o.bind("SUPER + code:49", "Workspace overview", "omarchy-shell shell toggle io.github.kimm-stensborg.workspaces '{\"view\":\"overview\"}'")
+```
+
+It is bound by key position (`code:49`) rather than by name, so it stays the
+same key whatever your layout. Move or remove it in the file or with
+[Plugin Manager](https://github.com/kimm-stensborg/omarchy-plugin-manager); it
+is only ever written once, so a removal sticks. `omarchy-workspaces
+bind-overview --force` writes it again.
+
+The overview shows what Hyprland has right now, not what the config asks for,
+so it is also a quick check that a workspace really is where you pinned it.
 
 ## The editor
 
@@ -143,6 +175,8 @@ omarchy-workspaces disable 4,10        # switch workspaces off entirely
 omarchy-workspaces enable 4            # and back on
 omarchy-workspaces apply               # regenerate rules, reload, re-home
 omarchy-workspaces open                # the visual editor
+omarchy-workspaces overview            # every workspace full screen (toggles)
+omarchy-workspaces bind-overview       # write the overview shortcut, if it is not there
 ```
 
 `assign` takes a live output name and stores the stable `desc:` selector for it,
@@ -217,6 +251,8 @@ omarchy-workspaces detect --force --count=6
 | `~/.config/omarchy/workspaces.json` | you | The source of truth. Read by the Lua generator, the bar widget, and the editor. |
 | `~/.config/hypr/workspaces.lua` | generated | Workspace rules. **Do not edit** — every apply overwrites it. |
 | `~/.config/hypr/hyprland.lua` | you | Gets one guarded `require` line appended once. |
+| `~/.config/hypr/bindings.lua` | you | Gets the overview shortcut appended once, if its key is free. |
+| `~/.local/state/omarchy-workspaces/overview-key` | generated | Remembers that the shortcut was offered, so removing it sticks. |
 
 ## Hacking on it
 

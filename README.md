@@ -73,8 +73,11 @@ omarchy-shell shell summon io.github.kimm-stensborg.workspaces '{}'
 ```
 
 **Drag** a workspace to another monitor. **Click** one, or press its number,
-to switch it off: no rule, no keybinding. **Identify** labels each physical
-screen. Nothing is written until **Apply**.
+to switch it off: no rule, no keybinding. Nothing is written until **Apply**.
+
+Each card shows its screen live, and pointing at a card, or dragging onto it,
+lights up the real screen, so identical monitors can't be mixed up.
+**Identify** (or `i`) lights them all.
 
 ## CLI
 

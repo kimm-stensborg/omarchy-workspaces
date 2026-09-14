@@ -13,6 +13,11 @@ import qs.Ui
 // workspace lives on exactly one monitor: drag a chip to move it to another,
 // click it to switch it off.
 //
+// Each card shows what is on that screen right now, and pointing at a card
+// lights up its real screen, so two identical monitors cannot be mixed up. The
+// screen the editor opens on is photographed just before the editor appears:
+// a live capture of it would only show the editor itself.
+//
 // Where the monitors themselves sit is read, never written. That belongs to
 // ~/.config/hypr/monitors.lua, and an editor that rewrites someone's hand-made
 // Lua is a worse idea than it sounds — see the note in the README.
@@ -75,7 +80,23 @@ Item {
   // each monitor in ~/.config/hypr/monitors.lua.
   property var geometry: ({})
   property var initialGeometry: ({})
-  property bool dirty: false
+  // The layout as it was loaded, so Apply lights up only when there is a
+  // difference to write. Moving a workspace away and back, or switching one
+  // off and on again, leaves nothing to apply.
+  property string savedState: ""
+  readonly property bool dirty: root.opened
+    && root.stateKey(root.assignments, root.disabled) !== root.savedState
+
+  // Order-free: each monitor's workspaces and the off list are compared as
+  // sets, since the order a drop happened to produce means nothing on disk.
+  function stateKey(assignments, disabled) {
+    var names = Object.keys(assignments || {}).sort()
+    var monitors = names.map(function (name) {
+      return [name, (assignments[name] || []).slice().sort(function (a, b) { return a - b })]
+    })
+    var off = (disabled || []).slice().sort(function (a, b) { return a - b })
+    return JSON.stringify([monitors, off])
+  }
 
   property color background: Color.menu.background
   property color foreground: Color.menu.text
@@ -128,24 +149,39 @@ Item {
       return
     }
 
+    // Already up: a second summon must not photograph the editor itself.
+    if (root.opened && root.view === "editor") return
+
     root.view = "editor"
     overviewKeyProc.running = true
     // The cards are named by model, which only the IPC object carries.
     Hyprland.refreshMonitors()
+    root.editorScreenName = Hyprland.focusedMonitor ? String(Hyprland.focusedMonitor.name || "") : ""
+    root.revealed = false
+    root.hostShot = ""
+    root.hoverName = ""
+    // Two files in turn, so the Image sees a new source and reloads.
+    root.shotCount += 1
+    shotProc.target = Quickshell.env("XDG_RUNTIME_DIR") + "/omarchy-workspaces-screen-" + (root.shotCount % 2) + ".png"
+    shotProc.command = ["grim", "-o", root.editorScreenName, shotProc.target]
+    if (!shotProc.running) shotProc.running = true
+    revealTimeout.restart()
     reloadFromDisk()
     // After `opened`, not before: `monitors` reads as empty until then, and a
     // spread across no monitors is a silent no-op.
     root.opened = true
     spreadIfUnassigned()   // no-op until the config lands; see onConfigChanged
-    Qt.callLater(function () { keys.forceActiveFocus() })
   }
 
   function close() {
     root.opened = false
+    root.revealed = false
+    root.identifying = false
+    root.hoverName = ""
   }
 
   function dismiss() {
-    root.opened = false
+    root.close()
     if (root.shell && typeof root.shell.hide === "function") root.shell.hide(root.pluginId)
   }
 
@@ -331,7 +367,7 @@ Item {
     // rebuild that picture. Dropping them stacks every card at the origin.
     root.seedGeometry()
     root.syncStageMonitors()
-    root.dirty = false
+    root.savedState = root.stateKey(root.assignments, root.disabled)
   }
 
   // ── editing ───────────────────────────────────────────────────────────────
@@ -349,7 +385,6 @@ Item {
     for (var key in next) next[key].sort(function (a, b) { return a - b })
 
     root.assignments = next
-    root.dirty = true
   }
 
   function isDisabled(id) {
@@ -363,7 +398,6 @@ Item {
     if (next.length === root.disabled.length) next.push(id)
     next.sort(function (a, b) { return a - b })
     root.disabled = next
-    root.dirty = true
   }
 
   // An even spread is what a fresh config already gets from `detect`, so the
@@ -390,7 +424,6 @@ Item {
       next[candidates[slot].name].push(id)
     }
     root.assignments = next
-    root.dirty = true
   }
 
   function apply() {
@@ -417,23 +450,59 @@ Item {
 
   // ── identifying the desk ──────────────────────────────────────────────────
 
-  // Which screen is which. The editor names monitors the way Hyprland does
-  // (DP-5, DP-7), and those names carry no hint about where the panel actually
-  // stands on the desk — on two identical displays they can even swap between
-  // boots. Identify answers it the only way that cannot be misread: by putting
-  // the name on the glass.
+  // Which screen is which. Two identical monitors are just DP-5 and DP-7 on the
+  // cards, and those names can swap between boots. So the cards show each
+  // screen's contents, and every physical screen gets a frame and its name on
+  // the glass: all of them for a moment when the editor opens (and on `i` /
+  // Identify), the one whose card is under the pointer, and the one a dragged
+  // workspace would land on.
+
+  // The editor opens on the screen that had focus and stays there.
+  property string editorScreenName: ""
+  readonly property var editorScreen: root.screenFor(root.editorScreenName)
+
+  property bool revealed: false
+  property string hostShot: ""
+  property int shotCount: 0
   property bool identifying: false
+  property string hoverName: ""
+
+  // The editor appears once the screen under it has been photographed, so the
+  // photo is of what the user was looking at, not of the editor.
+  function reveal() {
+    if (root.revealed || !root.opened || root.view !== "editor") return
+    root.revealed = true
+    root.identify()
+    Qt.callLater(function () { keys.forceActiveFocus() })
+  }
 
   function identify() {
     root.identifying = true
-    identifyTimeout.restart()
+    identifyTimer.restart()
   }
 
   Timer {
-    id: identifyTimeout
-    interval: 3000
+    id: identifyTimer
+    interval: 2500
     repeat: false
     onTriggered: root.identifying = false
+  }
+
+  // grim takes about a tenth of a second; slower than this, open without it.
+  Timer {
+    id: revealTimeout
+    interval: 600
+    repeat: false
+    onTriggered: root.reveal()
+  }
+
+  Process {
+    id: shotProc
+    property string target: ""
+    onExited: function (code) {
+      if (code === 0) root.hostShot = "file://" + shotProc.target
+      root.reveal()
+    }
   }
 
   // What a monitor is called, the way the Displays plugin says it: the model
@@ -451,13 +520,6 @@ Item {
       if (description) return description
     }
     return name
-  }
-
-  function monitorIndex(name) {
-    for (var i = 0; i < root.monitors.length; i++) {
-      if (root.monitors[i].name === String(name)) return i + 1
-    }
-    return 0
   }
 
   property bool dragging: false
@@ -512,70 +574,75 @@ Item {
 
   // ── surface ───────────────────────────────────────────────────────────────
 
-  // One label per screen, shown for a few seconds. A separate window per
-  // screen rather than something drawn inside the editor, because the whole
-  // point is to appear on the physical panel being named — the editor itself
-  // only ever occupies one of them.
-  //
-  // keyboardFocus None matters: these must not take focus from the editor
-  // underneath, or Esc and the number keys would stop working while they show.
+  // The name on the glass. One click-through window per screen, never taking
+  // focus, so the editor stays usable under it: Esc and the number keys keep
+  // working while they show. A frame round the edge and the name at the top;
+  // the editor's card sits in the middle of its own screen, clear of both.
   Variants {
-    model: root.identifying ? Quickshell.screens : []
+    model: root.opened && root.view === "editor" && root.revealed ? Quickshell.screens : []
 
     PanelWindow {
-      id: identifyPanel
+      id: marker
       required property var modelData
-
       screen: modelData
+
+      readonly property string monitorName: root.screenName(marker.modelData)
+      readonly property bool lit: root.identifying || root.hoverName === marker.monitorName
+        || (root.dragging && root.hoverValid && root.hoverTarget === marker.monitorName)
+
       anchors { top: true; bottom: true; left: true; right: true }
       color: "transparent"
       WlrLayershell.namespace: "omarchy-workspaces-identify"
       WlrLayershell.layer: WlrLayer.Overlay
       WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
       exclusionMode: ExclusionMode.Ignore
-
-      // Click-through, so the editor stays usable while the labels are up.
       mask: Region {}
 
-      Rectangle {
-        anchors.centerIn: parent
-        width: identifyColumn.implicitWidth + Style.spacing.panelPadding * 2
-        height: identifyColumn.implicitHeight + Style.spacing.panelPadding * 2
-        radius: Style.cornerRadius
-        color: root.background
-        border.width: Math.max(1, Style.space(2))
-        border.color: root.accent
+      Item {
+        anchors.fill: parent
+        opacity: marker.lit ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: 180 } }
 
-        Column {
-          id: identifyColumn
-          anchors.centerIn: parent
-          spacing: Style.spacing.sm
+        Rectangle {
+          anchors.fill: parent
+          color: "transparent"
+          border.width: Math.max(4, Style.space(6))
+          border.color: root.accent
+        }
 
-          Text {
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: String(root.monitorIndex(identifyPanel.modelData.name))
-            color: root.accent
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.subtitle * 4
-            font.bold: true
-            textFormat: Text.PlainText
-          }
-          Text {
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: String(identifyPanel.modelData.name)
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.subtitle
-            textFormat: Text.PlainText
-          }
-          Text {
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: identifyPanel.modelData.width + " x " + identifyPanel.modelData.height
-            color: root.foreground
-            opacity: 0.5
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            textFormat: Text.PlainText
+        Rectangle {
+          anchors.horizontalCenter: parent.horizontalCenter
+          anchors.top: parent.top
+          anchors.topMargin: Style.space(56)
+          width: markerColumn.implicitWidth + Style.spacing.panelPadding * 2
+          height: markerColumn.implicitHeight + Style.spacing.panelPadding * 2
+          radius: Style.cornerRadius
+          color: root.background
+          border.width: Math.max(1, Style.space(2))
+          border.color: root.accent
+
+          Column {
+            id: markerColumn
+            anchors.centerIn: parent
+            spacing: Style.spacing.sm
+
+            Text {
+              anchors.horizontalCenter: parent.horizontalCenter
+              text: root.displayName(marker.monitorName)
+              color: root.accent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.subtitle * 2
+              font.bold: true
+              textFormat: Text.PlainText
+            }
+            Text {
+              anchors.horizontalCenter: parent.horizontalCenter
+              text: marker.monitorName
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.subtitle
+              textFormat: Text.PlainText
+            }
           }
         }
       }
@@ -584,7 +651,8 @@ Item {
 
   PanelWindow {
     id: panel
-    visible: root.opened && root.view === "editor"
+    visible: root.opened && root.view === "editor" && root.revealed
+    screen: root.editorScreen
     anchors { top: true; bottom: true; left: true; right: true }
     color: "transparent"
     WlrLayershell.namespace: "omarchy-workspaces-editor"
@@ -619,6 +687,9 @@ Item {
             event.accepted = true
           } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
             if (root.dirty) root.apply()
+            event.accepted = true
+          } else if (event.text === "i") {
+            root.identify()
             event.accepted = true
           } else if (event.text >= "0" && event.text <= "9" && event.text.length === 1) {
             root.toggleWorkspace(event.text === "0" ? 10 : parseInt(event.text))
@@ -709,31 +780,53 @@ Item {
               border.width: targeted ? 2 : 1
               border.color: targeted ? root.accent : root.hairline
 
-              // The number Identify puts on the glass, so the two pictures can
-              // be matched up. Pointless with one screen — there is nothing to
-              // tell apart — so it only appears once there are two.
-              Rectangle {
-                id: badgeBox
-                visible: root.monitors.length > 1
-                anchors.top: parent.top
-                anchors.right: parent.right
-                anchors.margins: Style.spacing.sm
-                width: Math.max(badge.implicitWidth + Style.spacing.sm, badge.implicitHeight + Style.spacing.xxs * 2)
-                height: badge.implicitHeight + Style.spacing.xxs * 2
-                radius: Style.cornerRadius
-                color: "transparent"
-                border.width: 1
-                border.color: root.hairline
+              // Pointing at a card lights up its real screen.
+              HoverHandler {
+                onHoveredChanged: {
+                  if (hovered) root.hoverName = screenCard.monitorName
+                  else if (root.hoverName === screenCard.monitorName) root.hoverName = ""
+                }
+              }
 
-                Text {
-                  id: badge
+              // What is on this screen right now, dimmed so the labels and chips
+              // read. It covers the card, cropped rather than squashed where the
+              // monitor's shape is narrower than the card's.
+              Item {
+                id: shotLayer
+                anchors.fill: parent
+                anchors.margins: screenCard.border.width
+                clip: true
+
+                readonly property bool isHost: screenCard.monitorName === root.editorScreenName
+                readonly property real aspect: screenCard.modelData.width / screenCard.modelData.height
+                readonly property real coverWidth: Math.max(width, height * aspect)
+
+                ScreencopyView {
                   anchors.centerIn: parent
-                  text: String(root.monitorIndex(screenCard.monitorName))
-                  color: root.foreground
-                  opacity: 0.55
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  textFormat: Text.PlainText
+                  width: shotLayer.coverWidth
+                  height: shotLayer.coverWidth / shotLayer.aspect
+                  visible: !shotLayer.isHost
+                  captureSource: !shotLayer.isHost && root.opened && root.view === "editor" && root.revealed
+                    ? root.screenFor(screenCard.monitorName) : null
+                  live: true
+                }
+
+                Image {
+                  anchors.centerIn: parent
+                  width: shotLayer.coverWidth
+                  height: shotLayer.coverWidth / shotLayer.aspect
+                  visible: shotLayer.isHost
+                  source: shotLayer.isHost ? root.hostShot : ""
+                  cache: false
+                  asynchronous: true
+                  fillMode: Image.Stretch
+                  sourceSize.width: 640
+                }
+
+                Rectangle {
+                  anchors.fill: parent
+                  color: root.background
+                  opacity: screenCard.targeted ? 0.45 : 0.6
                 }
               }
 
@@ -759,7 +852,6 @@ Item {
                   Text {
                     anchors.verticalCenter: parent.verticalCenter
                     width: screenCard.width - Style.spacing.md * 2 - monitorIcon.implicitWidth - Style.spacing.sm
-                      - (badgeBox.visible ? badgeBox.width + Style.spacing.sm : 0)
                     text: root.displayName(screenCard.monitorName) + " · " + screenCard.monitorName
                     color: root.foreground
                     font.family: root.fontFamily
@@ -921,12 +1013,17 @@ Item {
   property real overviewOpenedAt: 0
   readonly property int echoWindow: 400
 
+  // Hyprland's name for a Quickshell screen, which is what everything else
+  // here is keyed by.
+  function screenName(screen) {
+    var hypr = screen && typeof Hyprland.monitorFor === "function" ? Hyprland.monitorFor(screen) : null
+    return hypr && hypr.name ? String(hypr.name) : String(screen ? screen.name || "" : "")
+  }
+
   function screenFor(name) {
     var screens = Quickshell.screens
     for (var i = 0; i < screens.length; i++) {
-      var hypr = typeof Hyprland.monitorFor === "function" ? Hyprland.monitorFor(screens[i]) : null
-      var candidate = hypr && hypr.name ? String(hypr.name) : String(screens[i].name || "")
-      if (candidate === name) return screens[i]
+      if (root.screenName(screens[i]) === name) return screens[i]
     }
     return screens.length > 0 ? screens[0] : null
   }
@@ -1217,7 +1314,10 @@ Item {
     width: ui.chipSize
     height: ui.chipSize
     radius: Style.cornerRadius
-    color: off ? "transparent" : (chipHover.hovered || lifted ? Style.hoverFill : Style.normalFill)
+    // Laid over the panel's own background, so a chip stays solid on top of
+    // the screen picture behind it.
+    color: off ? Qt.rgba(ui.background.r, ui.background.g, ui.background.b, 0.75)
+      : Qt.tint(ui.background, chipHover.hovered || lifted ? Style.hoverFill : Style.normalFill)
     border.width: 1
     border.color: off
       ? Qt.rgba(ui.foreground.r, ui.foreground.g, ui.foreground.b, 0.2)

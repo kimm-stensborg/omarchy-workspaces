@@ -8,9 +8,10 @@ import qs.Ui
 
 // Visual workspace-to-monitor editor.
 //
-// Monitors are drawn to scale in their real desktop arrangement, so the picture
-// on screen matches the one on the desk. Every workspace lives on exactly one
-// monitor: drag a chip to move it to another, click it to switch it off.
+// Monitors are drawn as equal cards, left to right in their desk order, so a
+// small screen gets as much room for its workspaces as a big one. Every
+// workspace lives on exactly one monitor: drag a chip to move it to another,
+// click it to switch it off.
 //
 // Where the monitors themselves sit is read, never written. That belongs to
 // ~/.config/hypr/monitors.lua, and an editor that rewrites someone's hand-made
@@ -85,7 +86,7 @@ Item {
   readonly property string fontFamily: Style.font.menuFamily
   readonly property color hairline: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.25)
 
-  readonly property int chipSize: Math.max(Style.space(30), Style.font.subtitle * 2)
+  readonly property int chipSize: Math.max(Style.space(40), Style.font.subtitle * 2.6)
 
   // ── lifecycle ─────────────────────────────────────────────────────────────
 
@@ -129,6 +130,8 @@ Item {
 
     root.view = "editor"
     overviewKeyProc.running = true
+    // The cards are named by model, which only the IPC object carries.
+    Hyprland.refreshMonitors()
     reloadFromDisk()
     // After `opened`, not before: `monitors` reads as empty until then, and a
     // spread across no monitors is a silent no-op.
@@ -412,30 +415,7 @@ Item {
     root.dismiss()
   }
 
-  // ── stage geometry ────────────────────────────────────────────────────────
-
-  readonly property var deskBounds: {
-    var list = root.monitors
-    if (list.length === 0) return { left: 0, top: 0, width: 1, height: 1 }
-    var left = list[0].x, top = list[0].y
-    var right = list[0].x + list[0].width, bottom = list[0].y + list[0].height
-    for (var i = 1; i < list.length; i++) {
-      left = Math.min(left, list[i].x)
-      top = Math.min(top, list[i].y)
-      right = Math.max(right, list[i].x + list[i].width)
-      bottom = Math.max(bottom, list[i].y + list[i].height)
-    }
-    return { left: left, top: top,
-             width: Math.max(1, right - left), height: Math.max(1, bottom - top) }
-  }
-
-  readonly property real deskLeft: root.deskBounds.left
-  readonly property real deskTop: root.deskBounds.top
-  readonly property real deskWidth: root.deskBounds.width
-  readonly property real deskHeight: root.deskBounds.height
-
-  // ── rearranging the desk ──────────────────────────────────────────────────
-
+  // ── identifying the desk ──────────────────────────────────────────────────
 
   // Which screen is which. The editor names monitors the way Hyprland does
   // (DP-5, DP-7), and those names carry no hint about where the panel actually
@@ -454,6 +434,23 @@ Item {
     interval: 3000
     repeat: false
     onTriggered: root.identifying = false
+  }
+
+  // What a monitor is called, the way the Displays plugin says it: the model
+  // (T27QD-40), or "Built-in display" for the laptop panel, whose model is a
+  // part number nobody knows. The connector goes beside it, not instead.
+  function displayName(name) {
+    if (/^(eDP|LVDS|DSI)/.test(name)) return "Built-in display"
+    var values = Hyprland.monitors ? Hyprland.monitors.values : []
+    for (var i = 0; i < values.length; i++) {
+      if (values[i].name !== name) continue
+      var ipc = values[i].lastIpcObject || {}
+      var model = String(ipc.model || "").trim()
+      if (model) return model
+      var description = String(values[i].description || ipc.description || "").trim()
+      if (description) return description
+    }
+    return name
   }
 
   function monitorIndex(name) {
@@ -671,14 +668,24 @@ Item {
           id: stage
           clip: true
           width: parent.width
-          // Monitors are drawn to scale, but a very wide desk would squash the
-          // chips out of existence, so the stage keeps a workable height range.
-          height: Math.max(Style.space(180),
-                    Math.min(Style.space(400), width * root.deskHeight / root.deskWidth))
+          height: cardHeight
 
-          readonly property real scaleFactor: Math.min(width / root.deskWidth, height / root.deskHeight)
-          readonly property real offsetX: (width - root.deskWidth * scaleFactor) / 2
-          readonly property real offsetY: (height - root.deskHeight * scaleFactor) / 2
+          // One card size for every monitor, in the widest one's shape. Drawn
+          // to scale, a laptop panel beside two 27" screens gets a card too
+          // small to drop on, and its workspaces matter just as much. Height
+          // is held to a range so the chips always fit and a single monitor
+          // does not fill the screen.
+          readonly property real cardGap: Style.spacing.md
+          readonly property int cardCount: Math.max(1, root.stageMonitors.length)
+          readonly property real cardAspect: {
+            var widest = 0
+            for (var i = 0; i < root.stageMonitors.length; i++)
+              widest = Math.max(widest, root.stageMonitors[i].width / root.stageMonitors[i].height)
+            return widest > 0 ? widest : 16 / 9
+          }
+          readonly property real cardWidth: (width - (cardCount - 1) * cardGap) / cardCount
+          readonly property real cardHeight: Math.max(Style.space(180),
+                                                      Math.min(Style.space(360), cardWidth / cardAspect))
 
           Repeater {
             id: screens
@@ -687,16 +694,15 @@ Item {
             Rectangle {
               id: screenCard
               required property var modelData
+              required property int index
 
               readonly property string monitorName: modelData.name
-              readonly property var geo: root.geometry[monitorName]
               readonly property bool targeted: root.dragging && root.hoverValid
                 && root.hoverTarget === monitorName
 
-              x: stage.offsetX + ((geo ? geo.x : 0) - root.deskLeft) * stage.scaleFactor
-              y: stage.offsetY + ((geo ? geo.y : 0) - root.deskTop) * stage.scaleFactor
-              width: Math.max(Style.space(96), modelData.width * stage.scaleFactor)
-              height: Math.max(Style.space(84), modelData.height * stage.scaleFactor)
+              x: index * (stage.cardWidth + stage.cardGap)
+              width: stage.cardWidth
+              height: stage.cardHeight
 
               radius: Style.cornerRadius
               color: targeted ? Style.selectedFill : Style.normalFill
@@ -707,6 +713,7 @@ Item {
               // be matched up. Pointless with one screen — there is nothing to
               // tell apart — so it only appears once there are two.
               Rectangle {
+                id: badgeBox
                 visible: root.monitors.length > 1
                 anchors.top: parent.top
                 anchors.right: parent.right
@@ -735,14 +742,32 @@ Item {
                 anchors.margins: Style.spacing.md
                 spacing: Style.spacing.sm
 
-                Text {
-                  width: parent.width
-                  text: screenCard.modelData.name
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  textFormat: Text.PlainText
-                  elide: Text.ElideRight
+                // Named the way the Displays plugin names it, "T27QD-40 · DP-5":
+                // the model says which screen, the connector which cable.
+                Row {
+                  spacing: Style.spacing.sm
+
+                  Text {
+                    id: monitorIcon
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "󰍹"
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.subtitle
+                    textFormat: Text.PlainText
+                  }
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: screenCard.width - Style.spacing.md * 2 - monitorIcon.implicitWidth - Style.spacing.sm
+                      - (badgeBox.visible ? badgeBox.width + Style.spacing.sm : 0)
+                    text: root.displayName(screenCard.monitorName) + " · " + screenCard.monitorName
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: true
+                    textFormat: Text.PlainText
+                    elide: Text.ElideRight
+                  }
                 }
                 Text {
                   width: parent.width
@@ -864,7 +889,7 @@ Item {
             text: root.keyLabel(root.dragId)
             color: root.accent
             font.family: root.fontFamily
-            font.pixelSize: Style.font.subtitle
+            font.pixelSize: Style.font.subtitle * 1.25
             textFormat: Text.PlainText
           }
         }
@@ -1059,10 +1084,20 @@ Item {
     readonly property real labelHeight: Style.font.bodySmall * 1.5 + Style.spacing.sm
     readonly property real hintHeight: Style.font.caption * 1.5 + Style.spacing.md
 
-    // One height for every tile, each as wide as its monitor's shape: the
-    // largest that lets the rows stack and the longest row fit. Two
-    // workspaces on a big screen would otherwise fill it, and past a point a
-    // bigger tile is not a clearer one.
+    // Every tile is the same size, in the widest monitor's shape, so the
+    // columns line up and no workspace looks lesser for its screen. A
+    // narrower monitor's picture sits centred inside its tile.
+    readonly property real tileAspect: {
+      var rows = root.overviewRows
+      if (rows.length === 0) return 16 / 9
+      var widest = 0
+      for (var i = 0; i < rows.length; i++) widest = Math.max(widest, rows[i].width / rows[i].height)
+      return widest
+    }
+
+    // The largest height that lets the rows stack and the longest row fit.
+    // Two workspaces on a big screen would otherwise fill it, and past a
+    // point a bigger tile is not a clearer one.
     readonly property real tileHeight: {
       var rows = root.overviewRows
       if (rows.length === 0) return 0
@@ -1071,8 +1106,7 @@ Item {
       var best = (availableHeight - rows.length * labelHeight - (rows.length - 1) * rowGap) / rows.length
       for (var i = 0; i < rows.length; i++) {
         var count = rows[i].workspaces.length
-        var aspect = rows[i].width / rows[i].height
-        best = Math.min(best, (availableWidth - (count - 1) * tileGap) / (count * aspect))
+        best = Math.min(best, (availableWidth - (count - 1) * tileGap) / (count * tileAspect))
       }
       return Math.max(Style.space(48), Math.min(best, availableHeight * 0.3))
     }
@@ -1123,7 +1157,7 @@ Item {
           Text {
             height: overviewPanel.labelHeight - Style.spacing.sm
             verticalAlignment: Text.AlignBottom
-            text: overviewRow.modelData.name
+            text: root.displayName(overviewRow.modelData.name) + " · " + overviewRow.modelData.name
             color: root.foreground
             opacity: 0.7
             font.family: root.fontFamily
@@ -1139,6 +1173,7 @@ Item {
               WorkspaceTile {
                 ui: root
                 monitor: overviewRow.modelData
+                width: overviewPanel.tileHeight * overviewPanel.tileAspect
                 height: overviewPanel.tileHeight
               }
             }
@@ -1198,7 +1233,7 @@ Item {
       // too and what is left is an outline.
       opacity: chip.off ? 0.35 : 1
       font.family: chip.ui.fontFamily
-      font.pixelSize: Style.font.subtitle
+      font.pixelSize: Style.font.subtitle * 1.25
       textFormat: Text.PlainText
     }
 
@@ -1213,11 +1248,14 @@ Item {
       opacity: 0.35
     }
 
-    HoverHandler { id: chipHover; cursorShape: Qt.OpenHandCursor }
+    // The move cursor, because moving is what a chip is for; a click to
+    // switch it off is the secondary thing.
+    HoverHandler { id: chipHover; cursorShape: Qt.SizeAllCursor }
 
     MouseArea {
       anchors.fill: parent
       preventStealing: true
+      cursorShape: Qt.SizeAllCursor
 
       property real pressX: 0
       property real pressY: 0
@@ -1253,8 +1291,8 @@ Item {
     }
   }
 
-  // One workspace in the overview: its monitor's shape, its windows where they
-  // sit, and its number in the corner.
+  // One workspace in the overview: its monitor's picture fitted to the tile,
+  // its windows where they sit, and its number in the corner.
   component WorkspaceTile: Rectangle {
     id: tile
 
@@ -1269,9 +1307,12 @@ Item {
       && Hyprland.focusedWorkspace.id === modelData
     readonly property bool shown: ui.isShown(modelData)
     readonly property bool selected: ui.overviewSelected === modelData
-    readonly property real unit: height / monitor.height
+    readonly property real unit: Math.min(width / monitor.width, height / monitor.height)
+    // Where the monitor's picture starts, centred when its shape is narrower
+    // than the tile's.
+    readonly property real screenX: (width - monitor.width * unit) / 2
+    readonly property real screenY: (height - monitor.height * unit) / 2
 
-    width: height * monitor.width / monitor.height
     radius: Style.cornerRadius
     clip: true
     color: Qt.rgba(ui.foreground.r, ui.foreground.g, ui.foreground.b, tileHover.hovered ? 0.12 : 0.06)
@@ -1302,8 +1343,8 @@ Item {
         readonly property var at: ipc.at || [0, 0]
         readonly property var size: ipc.size || [0, 0]
 
-        x: (at[0] - tile.monitor.x) * tile.unit
-        y: (at[1] - tile.monitor.y) * tile.unit
+        x: tile.screenX + (at[0] - tile.monitor.x) * tile.unit
+        y: tile.screenY + (at[1] - tile.monitor.y) * tile.unit
         width: Math.max(1, size[0] * tile.unit)
         height: Math.max(1, size[1] * tile.unit)
 

@@ -108,6 +108,9 @@ Item {
   readonly property color hairline: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.25)
 
   readonly property int chipSize: Math.max(Style.space(40), Style.font.subtitle * 2.6)
+  // The editor's one spacing unit: between chips, between cards, inside a
+  // card, and twice it between the header, the cards and the footer.
+  readonly property real gap: Style.spacing.md
 
   // ── lifecycle ─────────────────────────────────────────────────────────────
 
@@ -115,18 +118,6 @@ Item {
   // button and the shortcut open. The payload says which, so `{}` — what every
   // existing menu entry and binding sends — still means the editor.
   property string view: "editor"
-
-  // The overview's shortcut as the keyboard prints it ("SUPER + ½"), for the
-  // editor's footer. Asked again on every open, since Plugin Manager can move
-  // it at any time; empty when there is none.
-  property string overviewShortcut: ""
-
-  Process {
-    id: overviewKeyProc
-    command: ["bash", root.cli, "overview-key"]
-    stdout: StdioCollector { onStreamFinished: root.overviewShortcut = text.trim() }
-    onExited: function (code) { if (code !== 0) root.overviewShortcut = "" }
-  }
 
   function open(payloadJson) {
     var payload = ({})
@@ -153,9 +144,11 @@ Item {
     if (root.opened && root.view === "editor") return
 
     root.view = "editor"
-    overviewKeyProc.running = true
-    // The cards are named by model, which only the IPC object carries.
+    // The cards are named by model, which only the IPC object carries, and the
+    // chips mark which workspaces are showing and which have windows.
     Hyprland.refreshMonitors()
+    Hyprland.refreshWorkspaces()
+    Hyprland.refreshToplevels()
     root.editorScreenName = Hyprland.focusedMonitor ? String(Hyprland.focusedMonitor.name || "") : ""
     root.revealed = false
     root.hostShot = ""
@@ -706,7 +699,7 @@ Item {
         anchors.topMargin: card.contentTopInset
         anchors.leftMargin: card.contentLeftInset
         anchors.rightMargin: card.contentRightInset
-        spacing: Style.spacing.panelGap
+        spacing: root.gap * 2
 
         // ── header ──────────────────────────────────────────────────────────
         Column {
@@ -723,8 +716,8 @@ Item {
           Text {
             width: parent.width
             text: root.monitors.length > 1
-              ? "Drag a workspace to another monitor. Click one to switch it off."
-              : "One monitor, so everything lives here. Click a workspace to switch it off."
+              ? "Drag to move · click to switch off"
+              : "Click a workspace to switch it off"
             color: root.foreground
             opacity: 0.6
             font.family: root.fontFamily
@@ -746,7 +739,7 @@ Item {
           // small to drop on, and its workspaces matter just as much. Height
           // is held to a range so the chips always fit and a single monitor
           // does not fill the screen.
-          readonly property real cardGap: Style.spacing.md
+          readonly property real cardGap: root.gap
           readonly property int cardCount: Math.max(1, root.stageMonitors.length)
           readonly property real cardAspect: {
             var widest = 0
@@ -823,63 +816,80 @@ Item {
                   sourceSize.width: 640
                 }
 
+                // A light dim, so the screen still reads as itself; the label
+                // gets its own shade below.
                 Rectangle {
                   anchors.fill: parent
                   color: root.background
-                  opacity: screenCard.targeted ? 0.45 : 0.6
+                  opacity: screenCard.targeted ? 0.2 : 0.35
+                }
+
+                // Darkens only the strip the label sits on.
+                Rectangle {
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.bottom: parent.bottom
+                  height: labelBar.height + root.gap * 2
+                  gradient: Gradient {
+                    GradientStop { position: 0; color: "transparent" }
+                    GradientStop { position: 1; color: Qt.rgba(root.background.r, root.background.g, root.background.b, 0.9) }
+                  }
                 }
               }
 
-              Column {
-                anchors.fill: parent
-                anchors.margins: Style.spacing.md
-                spacing: Style.spacing.sm
-
-                // Named the way the Displays plugin names it, "T27QD-40 · DP-5":
-                // the model says which screen, the connector which cable.
-                Row {
-                  spacing: Style.spacing.sm
-
-                  Text {
-                    id: monitorIcon
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: "󰍹"
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.subtitle
-                    textFormat: Text.PlainText
-                  }
-                  Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: screenCard.width - Style.spacing.md * 2 - monitorIcon.implicitWidth - Style.spacing.sm
-                    text: root.displayName(screenCard.monitorName) + " · " + screenCard.monitorName
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                    font.bold: true
-                    textFormat: Text.PlainText
-                    elide: Text.ElideRight
-                  }
-                }
-                Text {
-                  width: parent.width
-                  text: screenCard.modelData.width + " x " + screenCard.modelData.height
-                  color: root.foreground
-                  opacity: 0.45
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  textFormat: Text.PlainText
-                  elide: Text.ElideRight
-                }
+              // The workspaces sit on the screen, centred in what the label
+              // leaves, the way windows sit on the real one.
+              Item {
+                anchors.top: parent.top
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: labelBar.top
+                anchors.margins: root.gap
 
                 Flow {
-                  width: parent.width
-                  spacing: Style.spacing.sm
+                  readonly property int count: (root.assignments[screenCard.monitorName] || []).length
+                  anchors.centerIn: parent
+                  width: Math.min(parent.width, count * root.chipSize + Math.max(0, count - 1) * root.gap)
+                  spacing: root.gap
 
                   Repeater {
                     model: root.assignments[screenCard.monitorName] || []
                     WorkspaceChip { ui: root }
                   }
+                }
+              }
+
+              // Named the way the Displays plugin names it, "T27QD-40 · DP-5",
+              // along the bottom like a label on the bezel: the model says
+              // which screen, the connector which cable.
+              Row {
+                id: labelBar
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                anchors.margins: root.gap
+                spacing: Style.spacing.sm
+
+                Text {
+                  id: monitorIcon
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "󰍹"
+                  color: root.foreground
+                  opacity: 0.8
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  textFormat: Text.PlainText
+                }
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: labelBar.width - monitorIcon.implicitWidth - labelBar.spacing
+                  text: root.displayName(screenCard.monitorName) + " · " + screenCard.monitorName
+                  color: root.foreground
+                  opacity: 0.8
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  textFormat: Text.PlainText
+                  elide: Text.ElideRight
                 }
               }
             }
@@ -891,55 +901,14 @@ Item {
           width: parent.width
           height: Style.spacing.controlHeight
 
-          // Where the overview is, since this is where people come to set
-          // things up. The shortcut is whatever it is now, not what it was
-          // first bound to — Plugin Manager can move it.
-          Row {
+          // Identify is about the desk, not the edit, so it stands apart
+          // from the two buttons that end one.
+          OverlayButton {
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.spacing.sm
-
-            Text {
-              anchors.verticalCenter: parent.verticalCenter
-              text: root.overviewShortcut ? "Overview" : "Overview: 󰖳 in the bar"
-              color: root.foreground
-              opacity: 0.6
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              textFormat: Text.PlainText
-            }
-
-            Rectangle {
-              visible: root.overviewShortcut !== ""
-              anchors.verticalCenter: parent.verticalCenter
-              width: shortcutLabel.implicitWidth + Style.spacing.sm * 2
-              height: shortcutLabel.implicitHeight + Style.spacing.xxs * 2
-              radius: Style.cornerRadius
-              color: Style.normalFill
-              border.width: 1
-              border.color: root.hairline
-
-              Text {
-                id: shortcutLabel
-                anchors.centerIn: parent
-                text: root.overviewShortcut
-                color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                textFormat: Text.PlainText
-              }
-            }
-
-            Text {
-              visible: root.overviewShortcut !== ""
-              anchors.verticalCenter: parent.verticalCenter
-              text: "or 󰖳 in the bar"
-              color: root.foreground
-              opacity: 0.6
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              textFormat: Text.PlainText
-            }
+            ui: root
+            label: "Identify"
+            onActivated: root.identify()
           }
 
           Row {
@@ -947,7 +916,6 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.spacing.controlGap
 
-            OverlayButton { ui: root; label: "Identify"; onActivated: root.identify() }
             OverlayButton { ui: root; label: "Cancel"; onActivated: root.dismiss() }
             OverlayButton {
               ui: root
@@ -1106,6 +1074,11 @@ Item {
       if (values[i].activeWorkspace && values[i].activeWorkspace.id === id) return true
     }
     return false
+  }
+
+  function hasWindows(id) {
+    var workspace = root.liveWorkspace(id)
+    return !!workspace && !!workspace.toplevels && workspace.toplevels.values.length > 0
   }
 
   // Tiled windows first and floating ones over them, each group oldest-focused
@@ -1346,6 +1319,33 @@ Item {
       height: 1
       color: chip.ui.foreground
       opacity: 0.35
+    }
+
+    // What Hyprland has right now, as the bar shows it: a dot when there are
+    // windows on it, and an accent bar under the one its monitor is showing.
+    readonly property bool shown: !off && ui.isShown(modelData)
+    readonly property bool occupied: !off && ui.hasWindows(modelData)
+
+    Rectangle {
+      visible: chip.occupied
+      anchors.horizontalCenter: parent.horizontalCenter
+      anchors.bottom: parent.bottom
+      anchors.bottomMargin: Math.round(parent.height * 0.16)
+      width: Math.max(3, Style.space(4))
+      height: width
+      radius: width / 2
+      color: chip.shown ? chip.ui.accent : chip.ui.foreground
+      opacity: chip.shown ? 1 : 0.6
+    }
+
+    Rectangle {
+      visible: chip.shown
+      anchors.horizontalCenter: parent.horizontalCenter
+      anchors.bottom: parent.bottom
+      anchors.bottomMargin: 1
+      width: parent.width * 0.5
+      height: Math.max(2, Style.space(2))
+      color: chip.ui.accent
     }
 
     // The move cursor, because moving is what a chip is for; a click to

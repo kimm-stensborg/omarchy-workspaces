@@ -168,6 +168,8 @@ Item {
 
   function close() {
     root.opened = false
+    root.naming = false
+    root.confirmingDelete = ""
     root.revealed = false
     root.identifying = false
     root.hoverName = ""
@@ -1011,6 +1013,12 @@ Item {
     root.overviewScreen = root.screenFor(name)
     root.overviewSelected = Hyprland.focusedWorkspace ? Hyprland.focusedWorkspace.id : 0
     root.overviewOpenedAt = Date.now()
+    root.naming = false
+    root.confirmingDelete = ""
+    root.presetCursor = -1
+    // A file that did not exist when the watch was set up is not watched, so
+    // the first preset ever saved would otherwise never show.
+    presetView.reload()
     root.view = "overview"
     root.opened = true
     Qt.callLater(function () { overviewKeys.forceActiveFocus() })
@@ -1112,9 +1120,21 @@ Item {
   // Left and right run on into the next row, so every tile is reachable with
   // two keys; up and down keep the column as far as the row is long.
   function moveSelection(rowStep, columnStep) {
+    // In the preset row, left and right walk it and up leaves it.
+    if (root.presetCursor >= 0) {
+      if (rowStep < 0) root.presetCursor = -1
+      else if (rowStep === 0)
+        root.presetCursor = Math.max(0, Math.min(root.presets.length, root.presetCursor + columnStep))
+      return
+    }
     var rows = root.overviewRows
     if (rows.length === 0) return
     var at = root.overviewPosition(root.overviewSelected)
+    // Down from the bottom row goes on into the presets, below the desk.
+    if (rowStep > 0 && at.row === rows.length - 1) {
+      root.presetCursor = 0
+      return
+    }
     var row = at.row
     var column = at.column + columnStep
     if (column < 0 && row > 0 && columnStep !== 0) {
@@ -1137,6 +1157,141 @@ Item {
     root.dismiss()
   }
 
+  // ── presets ───────────────────────────────────────────────────────────────
+  //
+  // The desk as it was, saved under a name and brought back later — after a
+  // reboot, typically. The overview is where the whole desk is in view, so it
+  // is where one is taken and where one is picked. The CLI does the work at
+  // both ends; the overview asks, and sees the file change.
+
+  readonly property string presetsPath: Quickshell.env("OMARCHY_WORKSPACES_PRESETS")
+    || Quickshell.env("HOME") + "/.config/omarchy/workspace-presets.json"
+  property var presetFile: null
+
+  FileView {
+    id: presetView
+    path: root.presetsPath
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.presetFile = root.parsePresets(text())
+    onLoadFailed: root.presetFile = null
+  }
+
+  function parsePresets(content) {
+    try {
+      var parsed = JSON.parse(String(content || ""))
+      return parsed && parsed.version === 1 && parsed.presets ? parsed : null
+    } catch (error) {
+      console.warn(root.pluginId, "ignoring unreadable presets", root.presetsPath, error)
+      return null
+    }
+  }
+
+  readonly property var presets: {
+    var out = []
+    var all = root.presetFile ? root.presetFile.presets : ({})
+    for (var name in all) out.push({ name: name, windows: (all[name].windows || []).length })
+    out.sort(function (left, right) { return left.name.toLowerCase().localeCompare(right.name.toLowerCase()) })
+    return out
+  }
+
+  function presetExists(name) {
+    return !!name && !!root.presetFile && root.presetFile.presets[name] !== undefined
+  }
+
+  // Where the keyboard is in the preset row: an index into `presets`, one
+  // past the end for the Save button, or -1 when it is up on the desk. The
+  // row is one more stop for the arrows and Enter, so a preset can be picked
+  // without the mouse.
+  property int presetCursor: -1
+
+  onPresetsChanged: {
+    if (root.presetCursor > root.presets.length) root.presetCursor = root.presets.length
+  }
+
+  function togglePresetRow() {
+    root.presetCursor = root.presetCursor < 0 ? 0 : -1
+  }
+
+  // Enter does whatever is selected: go to a workspace, restore a preset, or
+  // start naming a new one.
+  function activateSelection() {
+    if (root.presetCursor < 0) root.jumpTo(root.overviewSelected)
+    else if (root.presetCursor < root.presets.length) root.restorePreset(root.presets[root.presetCursor].name)
+    else root.startNaming()
+  }
+
+  function deleteSelectedPreset() {
+    if (root.presetCursor >= 0 && root.presetCursor < root.presets.length)
+      root.deletePreset(root.presets[root.presetCursor].name)
+  }
+
+  // Typing a name for a new one. The keys belong to the name field then, not
+  // to the overview, so a name with a 3 or a j in it stays a name.
+  property bool naming: false
+  // The preset whose delete has been pressed once and waits for a second.
+  property string confirmingDelete: ""
+
+  function startNaming() {
+    root.naming = true
+    root.confirmingDelete = ""
+    Qt.callLater(function () {
+      presetNameField.text = ""
+      presetNameField.forceActiveFocus()
+    })
+  }
+
+  function stopNaming() {
+    root.naming = false
+    Qt.callLater(function () { overviewKeys.forceActiveFocus() })
+  }
+
+  // A window with a parent is a dialog — Open, Save, Preferences. Hyprland
+  // does not say which windows have one and the Wayland toplevel does, so the
+  // list is made here and the CLI leaves them out.
+  function parentedWindows() {
+    var out = []
+    var values = Hyprland.toplevels ? Hyprland.toplevels.values : []
+    for (var i = 0; i < values.length; i++) {
+      if (values[i].wayland && values[i].wayland.parent) out.push(String(values[i].address))
+    }
+    return out
+  }
+
+  // Straight argv, no shell in between, so a name is only ever a name.
+  function savePreset(name) {
+    var trimmed = String(name || "").trim()
+    if (!trimmed) return
+    Quickshell.execDetached(["bash", root.cli, "preset", "save", "--notify",
+                             "--skip", JSON.stringify(root.parentedWindows()), "--name", trimmed])
+    root.dismiss()
+  }
+
+  // The overview goes first: restoring ends by focusing the workspaces the
+  // preset had on screen, and those are behind it.
+  function restorePreset(name) {
+    root.dismiss()
+    Quickshell.execDetached(["bash", root.cli, "preset", "restore", "--notify", "--name", name])
+  }
+
+  function deletePreset(name) {
+    if (root.confirmingDelete !== name) {
+      root.confirmingDelete = name
+      confirmTimer.restart()
+      return
+    }
+    root.confirmingDelete = ""
+    Quickshell.execDetached(["bash", root.cli, "preset", "delete", "--quiet", "--name", name])
+  }
+
+  Timer {
+    id: confirmTimer
+    interval: 3000
+    repeat: false
+    onTriggered: root.confirmingDelete = ""
+  }
+
   PanelWindow {
     id: overviewPanel
     visible: root.overviewShown
@@ -1153,6 +1308,9 @@ Item {
     readonly property real tileGap: Style.space(16)
     readonly property real labelHeight: Style.font.bodySmall * 1.5 + Style.spacing.sm
     readonly property real hintHeight: Style.font.caption * 1.5 + Style.spacing.md
+    readonly property real presetBarHeight: Style.spacing.controlHeight + Style.spacing.md
+    // Everything under the desk: the presets, and the hint below them.
+    readonly property real footerHeight: hintHeight + presetBarHeight
 
     // Every tile is the same size, in the widest monitor's shape, so the
     // columns line up and no workspace looks lesser for its screen. A
@@ -1172,7 +1330,7 @@ Item {
       var rows = root.overviewRows
       if (rows.length === 0) return 0
       var availableWidth = width - margin * 2
-      var availableHeight = height - margin * 2 - hintHeight
+      var availableHeight = height - margin * 2 - footerHeight
       var best = (availableHeight - rows.length * labelHeight - (rows.length - 1) * rowGap) / rows.length
       for (var i = 0; i < rows.length; i++) {
         var count = rows[i].workspaces.length
@@ -1199,11 +1357,14 @@ Item {
         var key = event.key
         if (key === Qt.Key_Escape) root.dismiss()
         else if (key === Qt.Key_Return || key === Qt.Key_Enter || key === Qt.Key_Space)
-          root.jumpTo(root.overviewSelected)
+          root.activateSelection()
+        else if (key === Qt.Key_Tab || key === Qt.Key_Backtab) root.togglePresetRow()
+        else if (key === Qt.Key_Delete || key === Qt.Key_Backspace) root.deleteSelectedPreset()
         else if (key === Qt.Key_Left || key === Qt.Key_H) root.moveSelection(0, -1)
         else if (key === Qt.Key_Right || key === Qt.Key_L) root.moveSelection(0, 1)
         else if (key === Qt.Key_Up || key === Qt.Key_K) root.moveSelection(-1, 0)
         else if (key === Qt.Key_Down || key === Qt.Key_J) root.moveSelection(1, 0)
+        else if (key === Qt.Key_S) root.startNaming()
         else if (event.text.length === 1 && event.text >= "0" && event.text <= "9")
           root.jumpTo(event.text === "0" ? root.keySlots : parseInt(event.text))
         else return
@@ -1213,7 +1374,7 @@ Item {
 
     Column {
       anchors.centerIn: parent
-      anchors.verticalCenterOffset: -overviewPanel.hintHeight / 2
+      anchors.verticalCenterOffset: -overviewPanel.footerHeight / 2
       spacing: overviewPanel.rowGap
 
       Repeater {
@@ -1252,11 +1413,93 @@ Item {
       }
     }
 
+    // The saved presets and the way to make one, between the desk and the
+    // hint. Naming one swaps the row for a field, in the same place.
+    Item {
+      anchors.horizontalCenter: parent.horizontalCenter
+      anchors.bottom: overviewHint.top
+      anchors.bottomMargin: Style.spacing.md
+      width: Math.min(parent.width - overviewPanel.margin * 2,
+                      root.naming ? namingRow.implicitWidth : presetRow.implicitWidth)
+      height: Style.spacing.controlHeight
+
+      Row {
+        id: presetRow
+        visible: !root.naming
+        anchors.horizontalCenter: parent.horizontalCenter
+        spacing: Style.spacing.controlGap
+
+        Repeater {
+          model: root.presets
+          PresetChip { ui: root }
+        }
+        OverlayButton {
+          ui: root
+          label: root.presets.length > 0 ? "Save preset…" : "Save this desk as a preset…"
+          selected: root.presetCursor === root.presets.length
+          onActivated: root.startNaming()
+          onPointed: root.presetCursor = root.presets.length
+        }
+      }
+
+      Row {
+        id: namingRow
+        visible: root.naming
+        anchors.horizontalCenter: parent.horizontalCenter
+        spacing: Style.spacing.controlGap
+
+        TextField {
+          id: presetNameField
+          anchors.verticalCenter: parent.verticalCenter
+          width: Style.space(300)
+          foreground: root.foreground
+          accent: root.accent
+          placeholderText: "Name this preset"
+          maximumLength: 40
+          onAccepted: root.savePreset(text)
+          Keys.onPressed: function (event) {
+            if (event.key === Qt.Key_Escape) {
+              root.stopNaming()
+              event.accepted = true
+            }
+          }
+        }
+        Text {
+          anchors.verticalCenter: parent.verticalCenter
+          visible: root.presetExists(presetNameField.text.trim())
+          text: "Replaces “" + presetNameField.text.trim() + "”"
+          color: root.accent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          textFormat: Text.PlainText
+        }
+        OverlayButton {
+          anchors.verticalCenter: parent.verticalCenter
+          ui: root
+          label: "Cancel"
+          onActivated: root.stopNaming()
+        }
+        OverlayButton {
+          anchors.verticalCenter: parent.verticalCenter
+          ui: root
+          label: "Save"
+          primary: true
+          active: presetNameField.text.trim() !== ""
+          onActivated: root.savePreset(presetNameField.text)
+        }
+      }
+    }
+
     Text {
+      id: overviewHint
       anchors.horizontalCenter: parent.horizontalCenter
       anchors.bottom: parent.bottom
       anchors.bottomMargin: overviewPanel.margin / 2
-      text: "Click or press 1–0 to go there  ·  arrows and Enter  ·  Esc to close"
+      text: root.naming
+        ? "Enter to save  ·  Esc to cancel"
+        : root.presetCursor >= 0
+          ? "← → to choose  ·  Enter to pick  ·  Del to delete  ·  Tab or ↑ back to the desk  ·  Esc to close"
+          : "Click or press 1–0 to go there  ·  arrows and Enter  ·  Tab for presets  ·  S to save a preset  ·  Esc to close"
       color: root.foreground
       opacity: 0.45
       font.family: root.fontFamily
@@ -1406,7 +1649,7 @@ Item {
     readonly property bool focused: Hyprland.focusedWorkspace !== null
       && Hyprland.focusedWorkspace.id === modelData
     readonly property bool shown: ui.isShown(modelData)
-    readonly property bool selected: ui.overviewSelected === modelData
+    readonly property bool selected: ui.overviewSelected === modelData && ui.presetCursor < 0
     readonly property real unit: Math.min(width / monitor.width, height / monitor.height)
     // Where the monitor's picture starts, centred when its shape is narrower
     // than the tile's.
@@ -1512,9 +1755,93 @@ Item {
     HoverHandler {
       id: tileHover
       cursorShape: Qt.PointingHandCursor
-      onHoveredChanged: if (hovered) tile.ui.overviewSelected = tile.modelData
+      onHoveredChanged: {
+        if (!hovered) return
+        tile.ui.overviewSelected = tile.modelData
+        tile.ui.presetCursor = -1
+      }
     }
     TapHandler { onTapped: tile.ui.jumpTo(tile.modelData) }
+  }
+
+  // One saved preset under the overview: its name and how many windows it
+  // opens. Clicking it, or Enter while it is selected, restores it. The cross
+  // beside it, shown on hover or selection, deletes it — as does Del — on the
+  // second press, once it has asked.
+  component PresetChip: Item {
+    id: presetChip
+
+    required property var modelData
+    required property int index
+    required property var ui
+
+    readonly property bool selected: ui.presetCursor === index
+    readonly property bool confirming: ui.confirmingDelete === modelData.name
+    readonly property bool hot: chipHover.hovered || selected || confirming
+
+    width: chipRow.implicitWidth
+    height: Style.spacing.controlHeight
+
+    // Pointing selects, as it does on the tiles, so the mouse and the keys
+    // never disagree about what Enter would do.
+    HoverHandler {
+      id: chipHover
+      onHoveredChanged: if (hovered) presetChip.ui.presetCursor = presetChip.index
+    }
+
+    Row {
+      id: chipRow
+      spacing: Style.spacing.xxs
+
+      Rectangle {
+        width: restoreLabel.implicitWidth + Style.spacing.controlPaddingX * 2
+        height: Style.spacing.controlHeight
+        radius: Style.cornerRadius
+        color: restoreHover.hovered ? Style.hoverFill : "transparent"
+        border.width: presetChip.selected ? 2 : 1
+        border.color: presetChip.selected ? presetChip.ui.accent : presetChip.ui.hairline
+
+        Text {
+          id: restoreLabel
+          anchors.centerIn: parent
+          text: presetChip.modelData.name + "  ·  " + presetChip.modelData.windows
+          color: presetChip.ui.foreground
+          font.family: presetChip.ui.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          textFormat: Text.PlainText
+        }
+
+        HoverHandler { id: restoreHover; cursorShape: Qt.PointingHandCursor }
+        TapHandler { onTapped: presetChip.ui.restorePreset(presetChip.modelData.name) }
+      }
+
+      Rectangle {
+        width: presetChip.confirming ? deleteLabel.implicitWidth + Style.spacing.controlPaddingX * 2 : height
+        height: Style.spacing.controlHeight
+        radius: Style.cornerRadius
+        opacity: presetChip.hot ? 1 : 0
+        color: presetChip.confirming ? Style.selectedFill : (deleteHover.hovered ? Style.hoverFill : "transparent")
+        border.width: presetChip.confirming ? 1 : 0
+        border.color: presetChip.ui.accent
+
+        Text {
+          id: deleteLabel
+          anchors.centerIn: parent
+          text: presetChip.confirming ? "Delete?" : "󰅖"
+          color: presetChip.confirming ? presetChip.ui.accent : presetChip.ui.foreground
+          opacity: presetChip.confirming ? 1 : 0.6
+          font.family: presetChip.ui.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          textFormat: Text.PlainText
+        }
+
+        HoverHandler { id: deleteHover; enabled: presetChip.hot; cursorShape: Qt.PointingHandCursor }
+        TapHandler {
+          enabled: presetChip.hot
+          onTapped: presetChip.ui.deletePreset(presetChip.modelData.name)
+        }
+      }
+    }
   }
 
   component OverlayButton: Rectangle {
@@ -1524,15 +1851,18 @@ Item {
     property string label: ""
     property bool primary: false
     property bool active: true
+    // Where the keyboard is, drawn the way a selected tile is.
+    property bool selected: false
     signal activated()
+    signal pointed()
 
     width: buttonLabel.implicitWidth + Style.spacing.controlPaddingX * 2
     height: Style.spacing.controlHeight
     radius: Style.cornerRadius
     opacity: active ? 1 : 0.4
     color: primary && active ? Style.selectedFill : (buttonHover.hovered ? Style.hoverFill : "transparent")
-    border.width: 1
-    border.color: primary && active ? ui.accent : ui.hairline
+    border.width: selected ? 2 : 1
+    border.color: selected || (primary && active) ? ui.accent : ui.hairline
 
     Text {
       id: buttonLabel
@@ -1544,7 +1874,12 @@ Item {
       textFormat: Text.PlainText
     }
 
-    HoverHandler { id: buttonHover; enabled: button.active; cursorShape: Qt.PointingHandCursor }
+    HoverHandler {
+      id: buttonHover
+      enabled: button.active
+      cursorShape: Qt.PointingHandCursor
+      onHoveredChanged: if (hovered) button.pointed()
+    }
     TapHandler { enabled: button.active; onTapped: button.activated() }
   }
 }

@@ -37,7 +37,12 @@ STATE_DIR="${OMARCHY_WORKSPACES_STATE:-$HOME/.local/state/omarchy-workspaces}"
 OVERVIEW_KEY="SUPER + code:49"
 OVERVIEW_PAYLOAD='{"view":"overview"}'
 
-die() { echo "omarchy-workspaces: $*" >&2; exit 1; }
+# With --notify nobody reads stderr, so the failure goes up as a notification.
+die() {
+  echo "omarchy-workspaces: $*" >&2
+  if ((${NOTIFY:-0})); then notify -u normal "Workspaces" "$*"; fi
+  exit 1
+}
 say() { ((QUIET)) || echo "$@"; }
 
 # ── config helpers ───────────────────────────────────────────────────────────
@@ -122,7 +127,11 @@ write_config() { # stdin = new json
   mv "$tmp" "$CONFIG"
 }
 
-monitors_json() { hyprctl monitors -j; }
+# OMARCHY_WORKSPACES_MONITORS stands in for Hyprland's answer where there is
+# no Hyprland to ask, the way the tests run.
+monitors_json() {
+  if [[ -n ${OMARCHY_WORKSPACES_MONITORS:-} ]]; then cat "$OMARCHY_WORKSPACES_MONITORS"; else hyprctl monitors -j; fi
+}
 
 # Resolve a config selector ("eDP-1" or "desc:Some Monitor SERIAL") to the
 # connected output name, or empty when that monitor is not plugged in.
@@ -973,6 +982,932 @@ cmd_overview_key() {
   echo
 }
 
+# ── presets ──────────────────────────────────────────────────────────────────
+#
+# A preset is the desk as it was: which apps were open on which workspace, in
+# what order, and where the floating ones sat. It is saved from the overview
+# and restored from it — typically after a reboot, onto an empty desk.
+#
+# It has a file of its own rather than a key in workspaces.json, because the
+# shell service reloads Hyprland whenever workspaces.json changes, and saving
+# a preset changes nothing about where workspaces go.
+
+PRESETS="${OMARCHY_WORKSPACES_PRESETS:-$HOME/.config/omarchy/workspace-presets.json}"
+# How long one app gets to put up a window before restore moves on without
+# it. A browser restoring its own session on a cold boot is the slow case.
+LAUNCH_TIMEOUT=${OMARCHY_WORKSPACES_LAUNCH_TIMEOUT:-20}
+NOTIFY=0
+
+# A missing file is no presets yet. A broken one is refused rather than read
+# as empty, since the next save would then write over every preset in it.
+presets_json() {
+  if [[ ! -f $PRESETS ]]; then
+    echo '{"version":1,"presets":{}}'
+    return
+  fi
+  jq -e '.version == 1 and (.presets | type == "object")' "$PRESETS" >/dev/null 2>&1 ||
+    die "$PRESETS is not a version 1 presets file"
+  cat "$PRESETS"
+}
+
+write_presets() { # stdin = new json
+  local tmp
+  mkdir -p "$(dirname "$PRESETS")"
+  tmp=$(mktemp "${PRESETS}.XXXXXX")
+  cat >"$tmp"
+  jq -e '.version == 1' "$tmp" >/dev/null || { rm -f "$tmp"; die "refusing to write an invalid presets file"; }
+  mv "$tmp" "$PRESETS"
+}
+
+# OMARCHY_WORKSPACES_CLIENTS is the test hook, as OMARCHY_WORKSPACES_MONITORS
+# is for monitors_json.
+clients_json() {
+  if [[ -n ${OMARCHY_WORKSPACES_CLIENTS:-} ]]; then cat "$OMARCHY_WORKSPACES_CLIENTS"; else hyprctl clients -j; fi
+}
+
+# Which layout each workspace tiles with, and on which monitor it is.
+workspaces_json() {
+  if [[ -n ${OMARCHY_WORKSPACES_WORKSPACES:-} ]]; then cat "$OMARCHY_WORKSPACES_WORKSPACES"; else hyprctl workspaces -j 2>/dev/null || echo '[]'; fi
+}
+
+dispatch() { hyprctl dispatch "$1" >/dev/null 2>&1 || true; }
+
+# Only when asked: the overlay asks, because nobody sees its output. In a
+# terminal the output says the same thing. It takes the place of the restore's
+# progress notification, when there is one.
+notify() {
+  ((NOTIFY)) || return 0
+  command -v omarchy-notification-send >/dev/null || return 0
+  omarchy-notification-send -g "󰖳" ${PROGRESS_ID:+-r "$PROGRESS_ID"} "$@" >/dev/null 2>&1 || true
+}
+
+# One notification for a whole restore, updated in place as it goes, so it is
+# never silent and never leaves a pile of toasts behind. It stays up until the
+# summary replaces it. In a terminal the same line is printed.
+PROGRESS_ID=""
+progress() { # headline body
+  say "  $2"
+  ((NOTIFY)) || return 0
+  command -v omarchy-notification-send >/dev/null || return 0
+  local id
+  id=$(omarchy-notification-send -g "󰖳" -t 0 -p ${PROGRESS_ID:+-r "$PROGRESS_ID"} "$1" "$2" 2>/dev/null |
+    grep -oE '[0-9]+' | tail -1 || true)
+  PROGRESS_ID=${id:-$PROGRESS_ID}
+}
+
+# The name as typed, trimmed. It is a JSON key and a button label, so it can
+# be anything printable; only an empty or runaway one is refused.
+preset_name() {
+  local name=$1
+  name=${name#"${name%%[![:space:]]*}"}
+  name=${name%"${name##*[![:space:]]}"}
+  [[ -n $name ]] || die "a preset needs a name"
+  ((${#name} <= 40)) || die "a preset name is at most 40 characters"
+  [[ $name != *[[:cntrl:]]* ]] || die "a preset name cannot contain control characters"
+  printf '%s' "$name"
+}
+
+preset_get() {
+  presets_json | jq -ce --arg n "$1" '.presets[$n] // empty' || die "there is no preset called “$1”"
+}
+
+# ── taking the snapshot ──────────────────────────────────────────────────────
+
+# Which windows belong to the desk, and what is kept of each.
+#
+# A dialog is not part of anybody's desk. Everything with a parent window is
+# one — Open, Save, Preferences — and the overlay, which can see parents,
+# passes those addresses in as $skip. What is left to catch here is what has
+# no parent because it comes from another process: the portal's file pickers,
+# polkit and pinentry prompts. A title is only trusted on a floating window,
+# since a browser's title is whatever page it happens to show.
+#
+# Omarchy's own terminal windows — btop, the package installer, TUI.float —
+# are started by its keys and menus, which start them again better than a
+# restore could. One restored without its program, under org.omarchy.btop,
+# would even be focused by the btop key in place of btop. They are left out.
+#
+# Notifications, widgets and the bar are layer surfaces, not windows, so they
+# never reach this list at all. Neither does the scratchpad: special
+# workspaces are not places on the desk.
+#
+# Every position is kept relative to its monitor, so it lands right even
+# after output names or the arrangement change. Tiled windows keep theirs too:
+# the restore reads the layout back out of where they sat.
+PRESET_SNAPSHOT_JQ='
+  def addr: ascii_downcase | ltrimstr("0x");
+  def tagged($t): (.tags // []) | map(rtrimstr("*")) | index($t) != null;
+  def dialog_title:
+    test("^(Open.*Files?|Open [Ff]older.*|Save.*Files?|Save.*As|Save|All Files|.*wants to (open|save).*|[Cc]hoose.*)");
+  ($skip | map(tostring | addr)) as $skipped
+  | ($mons | map({ key: (.id | tostring), value: . }) | from_entries) as $byId
+  | (group_by(.pid) | map({ key: (.[0].pid | tostring), value: length }) | from_entries) as $perPid
+  | [ .[]
+      | select(.workspace.id > 0)
+      | select((.hidden // false) | not)
+      | select((.address | addr) as $a | $skipped | index($a) | not)
+      | select((.class // "") != "")
+      | select(.class | test("^(xdg-desktop-portal.*|.*polkit.*|pinentry.*|org\\.omarchy\\..*|TUI\\..*)$"; "i") | not)
+      | select((.floating and ((.title // "") | dialog_title)) | not)
+      | select(tagged("pip") | not)
+      | ($byId[(.monitor | tostring)] // { x: 0, y: 0 }) as $m
+      | { workspace: .workspace.id, class, title: (.title // ""), pid,
+          stable: ((.stableId // "") | tostring),
+          floating, fullscreen: (.fullscreen // 0), pinned: (.pinned // false),
+          at: [ .at[0] - $m.x, .at[1] - $m.y ], size,
+          terminal: tagged("terminal"),
+          shared: ($perPid[(.pid | tostring)] > 1) } ]
+  | sort_by(.workspace, (.stable | length), .stable)'
+
+# A process's argv as a JSON array, or [] once it is gone. Read as raw text
+# and split on NUL, never passed to jq as arguments: jq takes an argument
+# like --app-id=… for one of its own options, and gives up.
+proc_argv() {
+  [[ -r /proc/$1/cmdline ]] || { echo '[]'; return; }
+  unpack_argv "$(jq -Rsc 'split("\u0000") | if .[-1] == "" then .[:-1] else . end' "/proc/$1/cmdline" 2>/dev/null || echo '[]')"
+}
+
+# Chromium and Electron rewrite their own argv into a single string, spaces
+# and all, which run as it stands is one long file name that does not exist.
+# A lone argument whose first word is an executable is split back up.
+unpack_argv() {
+  local first
+  first=$(jq -r 'if length == 1 and (.[0] | test(" ")) then .[0] | split(" ")[0] else "" end' <<<"$1")
+  if [[ -n $first && -x $first && ! -e $(jq -r '.[0]' <<<"$1") ]]; then
+    jq -c '.[0] | split(" ") | map(select(length > 0))' <<<"$1"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+# The process that owns the terminal's foreground: the tpgid of the shell,
+# field 8 of its stat. That is nvim while nvim runs, and the shell itself at a
+# prompt. Without a terminal to own (tpgid -1) it is the process itself.
+foreground_of() {
+  local stat rest tpgid
+  stat=$(cat "/proc/$1/stat" 2>/dev/null) || { echo "$1"; return; }
+  # The command name sits in parentheses and may hold spaces, so fields are
+  # counted from after it: state ppid pgrp session tty tpgid.
+  rest=${stat##*) }
+  read -r _ _ _ _ _ tpgid _ <<<"$rest"
+  if [[ $tpgid =~ ^[0-9]+$ ]] && ((tpgid > 0)) && [[ -d /proc/$tpgid ]]; then
+    echo "$tpgid"
+  else
+    echo "$1"
+  fi
+}
+
+PRESET_SHELLS=" bash zsh fish sh dash ksh mksh tcsh csh nu elvish xonsh "
+
+# What a terminal may be running for a restore to start it again: programs
+# that stay open and are safe to open twice — editors, viewers, monitors, git
+# and file managers, remote shells, multiplexers. Anything else — a build, an
+# upgrade, a deploy — is not run again, and the terminal comes back as a shell
+# in its directory. AI agents are left off, since an argument to one can be a
+# prompt it would act on a second time. `rerun` in the presets file, a list
+# of program names, adds to this one.
+PRESET_RERUN="nvim vim vi nano hx helix emacs micro kak
+  btop htop top btm nvtop glances ncdu k9s
+  lazygit lazydocker gitui tig yazi ranger lf nnn mc
+  less more man ssh mosh tmux zellij screen herdr
+  cmus ncmpcpp newsboat weechat irssi aerc neomutt calcurse"
+
+rerun_allowed() { # program, by path or name
+  local name=${1##*/} extra
+  [[ -n $name ]] || return 1
+  extra=$(presets_json 2>/dev/null | jq -r '.rerun // [] | map(tostring) | join(" ")' 2>/dev/null || true)
+  [[ " ${PRESET_RERUN//$'\n'/ } $extra " == *" $name "* ]]
+}
+
+# A terminal comes back in the directory it was in, under the app id it had.
+# What was running in it comes back too when it is on the rerun list; when it
+# is not, only its name is kept, for `preset show` to say what was left out.
+# Several windows sharing one terminal process — a foot server, a
+# single-instance kitty — cannot be told apart from the outside, so those
+# come back as a plain shell.
+terminal_recipe() {
+  local pid=$1 class=$2 shared=$3 child fg cwd="" run="[]" skipped=""
+  if [[ $shared != true ]]; then
+    child=$(pgrep -o -P "$pid" 2>/dev/null || true)
+    if [[ -n $child ]]; then
+      fg=$(foreground_of "$child")
+      cwd=$(readlink "/proc/$fg/cwd" 2>/dev/null || true)
+      if [[ $PRESET_SHELLS != *" $(cat "/proc/$fg/comm" 2>/dev/null) "* ]]; then
+        run=$(proc_argv "$fg")
+        if ! rerun_allowed "$(jq -r '.[0] // ""' <<<"$run")"; then
+          skipped=$(jq -r 'join(" ")' <<<"$run")
+          run="[]"
+        fi
+      fi
+    fi
+  fi
+  jq -cn --arg c "$class" --arg d "$cwd" --argjson r "$run" --arg s "$skipped" '
+    { via: "terminal" }
+    + (if $d == "" then {} else { cwd: $d } end)
+    + (if ($r | length) > 0 then { run: $r } else {} end)
+    + (if $s == "" then {} else { skipped: $s } end)'
+}
+
+# Made at restore time, never taken from the file whole: the program is
+# looked up on the rerun list again, so a preset from an older version, or
+# edited by hand, cannot run anything the list does not allow. It runs in a
+# shell that stays when it exits, as the terminal it was saved from would.
+terminal_argv() { # class cwd run-json
+  local run=${3:-[]}
+  if ! jq -e 'type == "array" and all(.[]; type == "string")' <<<"$run" >/dev/null 2>&1 ||
+    ! rerun_allowed "$(jq -r '.[0] // ""' <<<"$run")"; then
+    run="[]"
+  fi
+  jq -cn --arg c "$1" --arg d "$2" --argjson r "$run" '
+    ["uwsm-app", "--", "xdg-terminal-exec", "--app-id=" + $c]
+    + (if $d == "" then [] else ["--dir=" + $d] end)
+    + (if ($r | length) == 0 then []
+       else ["-e", "bash", "-c", "\"$@\"; exec \"${SHELL:-bash}\"", "_"] + $r end)'
+}
+
+# A web app opened while its browser was already running is a window of the
+# browser's process, whose command line knows nothing of it. Its class does:
+# Chromium names it browser-host_path-profile, with the path's slashes as
+# underscores, so chrome-claude.ai__-Default is https://claude.ai/.
+webapp_url() {
+  [[ $1 =~ ^(chrome|chromium|brave|msedge|vivaldi|opera|helium)-([^_]+)_(.*)-[^-]+$ ]] || return 0
+  printf 'https://%s%s\n' "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]//_//}"
+}
+
+application_dirs() {
+  local dirs d
+  printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+  IFS=: read -ra dirs <<<"${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+  for d in "${dirs[@]}"; do
+    if [[ -n $d ]]; then printf '%s\n' "$d/applications"; fi
+  done
+}
+
+# The desktop entry that opens windows of this class: the one that says so
+# with StartupWMClass, or else the one named after it. A desktop id keeps its
+# subdirectories as dashes.
+desktop_for() {
+  local class=$1 dir file dirs=()
+  mapfile -t dirs < <(application_dirs)
+  for dir in "${dirs[@]}"; do
+    [[ -d $dir ]] || continue
+    file=$(grep -rlisFx --include='*.desktop' "StartupWMClass=$class" "$dir" | head -1 || true)
+    if [[ -n $file ]]; then
+      file=${file#"$dir"/}
+      echo "${file//\//-}"
+      return
+    fi
+  done
+  for dir in "${dirs[@]}"; do
+    for file in "$dir/$class.desktop" "$dir/${class,,}.desktop"; do
+      if [[ -f $file ]]; then
+        basename "$file"
+        return
+      fi
+    done
+  done
+}
+
+# How to open a window like this one again, first match wins: a terminal, a
+# web app, the app's desktop entry, and last the command line its process was
+# started with. The command line rides along with a desktop entry as the
+# fallback, for the entry that has gone away since.
+launch_recipe() {
+  local w=$1 pid class argv url desktop
+  pid=$(jq -r .pid <<<"$w")
+  class=$(jq -r .class <<<"$w")
+  if [[ $(jq -r .terminal <<<"$w") == true ]]; then
+    terminal_recipe "$pid" "$class" "$(jq -r .shared <<<"$w")"
+    return
+  fi
+  argv=$(proc_argv "$pid")
+  url=$(jq -r 'map(select(startswith("--app="))) | first // "" | ltrimstr("--app=")' <<<"$argv")
+  [[ -n $url ]] || url=$(webapp_url "$class")
+  if [[ -n $url ]]; then
+    jq -cn --arg u "$url" '{ via: "webapp", argv: ["omarchy-launch-webapp", $u] }'
+    return
+  fi
+  desktop=$(desktop_for "$class")
+  if [[ -n $desktop ]]; then
+    jq -cn --arg d "$desktop" --argjson f "$argv" '
+      { via: "desktop", argv: ["uwsm-app", "--", $d] }
+      + (if ($f | length) > 0 then { fallback: (["uwsm-app", "--"] + $f) } else {} end)'
+    return
+  fi
+  if [[ $argv != "[]" ]]; then
+    jq -cn --argjson f "$argv" '{ via: "command", argv: (["uwsm-app", "--"] + $f) }'
+    return
+  fi
+  echo '{"via":"none"}'
+}
+
+preset_save() {
+  local name=$1 skip=$2 existing mons clients windows preset kept total missing
+  jq -e 'type == "array"' <<<"$skip" >/dev/null 2>&1 || die "--skip takes a JSON array of window addresses"
+  existing=$(presets_json)
+  mons=$(monitors_json)
+  clients=$(clients_json)
+  windows=$(jq -c --argjson skip "$skip" --argjson mons "$mons" "$PRESET_SNAPSHOT_JQ" <<<"$clients")
+
+  preset=$(jq -c '.[]' <<<"$windows" | while IFS= read -r w; do
+    jq -c --argjson l "$(launch_recipe "$w")" '. + { launch: $l } | del(.pid, .stable, .shared, .terminal)' <<<"$w"
+  done | jq -cs --argjson mons "$mons" --argjson spaces "$(workspaces_json)" '
+    . as $windows
+    | { saved: (now | todate),
+        focused: ([ $mons[] | select(.focused) | .activeWorkspace.id ] | first // null),
+        shown: ([ $mons[] | .activeWorkspace.id | select(. > 0) ] | unique),
+        workspaces: ([ $spaces[]
+          | select(.id as $id | $windows | any(.workspace == $id))
+          | (.monitorID as $m | $mons | map(select(.id == $m)) | first) as $mon
+          | { key: (.id | tostring),
+              value: { layout: (.tiledLayout // "dwindle"),
+                       monitor: (if $mon == null then null
+                                 else (if (($mon.transform // 0) % 2) == 1 then [$mon.height, $mon.width]
+                                       else [$mon.width, $mon.height] end)
+                                      | if any(. == null) then null
+                                        else map(. / ($mon.scale // 1) | round) end end) } } ]
+          | from_entries),
+        windows: $windows }')
+
+  jq --arg n "$name" --argjson p "$preset" '.presets[$n] = $p' <<<"$existing" | write_presets
+
+  kept=$(jq '.windows | length' <<<"$preset")
+  total=$(jq '[.[] | select(.workspace.id > 0)] | length' <<<"$clients")
+  local spaces; spaces=$(jq '.windows | map(.workspace) | unique | length' <<<"$preset")
+  local summary="$kept window$( ((kept == 1)) || echo s) on $spaces workspace$( ((spaces == 1)) || echo s)"
+  ((total > kept)) && summary+=" ($((total - kept)) left out)"
+  say "Saved “$name”: $summary."
+  missing=$(jq -r '.windows[] | select(.launch.via == "none") | .class' <<<"$preset")
+  if [[ -n $missing ]]; then
+    echo "omarchy-workspaces: no way found to reopen: $(tr '\n' ' ' <<<"$missing")" >&2
+  fi
+  notify "Saved “$name”" "$summary"
+}
+
+preset_list() {
+  local out
+  out=$(presets_json | jq -r '.presets | to_entries | sort_by(.key | ascii_downcase)[]
+    | (.value.windows | length) as $w
+    | (.value.windows | map(.workspace) | unique | length) as $s
+    | "  \(.key) — \($w) window\(if $w == 1 then "" else "s" end) on \($s) workspace\(if $s == 1 then "" else "s" end)"
+      + (if .value.saved then ", saved \(.value.saved[0:16] | sub("T"; " "))" else "" end)')
+  if [[ -z $out ]]; then
+    say "No presets yet. Save one from the overview (S), or with 'preset save <name>'."
+  else
+    echo "$out"
+  fi
+}
+
+preset_show() {
+  preset_get "$1" | jq -r '
+    (.workspaces // {}) as $spaces
+    | .windows | group_by(.workspace)[]
+    | "  " + (.[0].workspace | tostring)
+      + ($spaces[.[0].workspace | tostring].layout // "" | if . == "" then "" else "  (" + . + ")" end) + "\n"
+      + (map("      " + .class
+             + (if .floating then " (floating)" else "" end)
+             + "  — " + .launch.via
+             + (if .launch.cwd then " in " + .launch.cwd else "" end)
+             + (if .launch.run then ": " + (.launch.run | join(" ")) else "" end)
+             + (if .launch.skipped then "  (not run again: " + .launch.skipped + ")" else "" end))
+         | join("\n"))'
+}
+
+preset_delete() {
+  local existing
+  preset_get "$1" >/dev/null
+  existing=$(presets_json)
+  jq --arg n "$1" 'del(.presets[$n])' <<<"$existing" | write_presets
+  say "Deleted “$1”."
+}
+
+# ── restoring it ─────────────────────────────────────────────────────────────
+
+# Which window already open stands in for which window of the preset. Only
+# the same app qualifies. Two passes, so a window with the exact title is
+# never taken by an earlier, vaguer match, and within a pass a window already
+# on the right workspace is preferred. Special workspaces are out: moving the
+# scratchpad's terminal onto the desk is not what restoring a desk means.
+PRESET_PLAN_JQ='
+  ($open | map(select(.workspace.id > 0))) as $open
+  | def claim($exact):
+      reduce range(0; $want | length) as $i (.;
+        if .plan[$i] != null then . else
+          . as $s | $want[$i] as $w
+          | ([ $open[]
+               | select(.class == $w.class)
+               | select(.address as $a | $s.claimed | index($a) | not)
+               | select(($exact | not) or .title == $w.title) ]
+             | sort_by(if .workspace.id == $w.workspace then 0 else 1 end)
+             | first) as $hit
+          | if $hit == null then . else .plan[$i] = $hit.address | .claimed += [$hit.address] end
+        end);
+  { plan: [range(0; $want | length) | null], claimed: [] }
+  | claim(true) | claim(false)
+  | . as $s
+  | [ range(0; $want | length) as $i | $want[$i] + { reuse: $s.plan[$i] } ]'
+
+# The layout of one workspace, read back out of where its tiled windows sat,
+# as the steps that build it again. The input is those windows as
+# { i, x0, y0, x1, y1, fs }; each step tiles window `tile`, most of them next
+# to window `onto`, which is in place already.
+#
+# Dwindle is a tree of splits, and every split in it runs the whole length of
+# the space it divides. So the space is cut where a line runs through it
+# without crossing a window — across before down — and each side is cut
+# again. The first window of the second side is tiled onto the first window
+# of the first, towards it (`dir`), and that split is then set to where the
+# cut was (`ratio`: dwindle's, which is twice the first side's share).
+#
+# Scrolling is a row of columns, a column being the windows that start at the
+# same x. The top one of each is tiled after the column before and sized
+# (`width`, the column's share of the monitor, gaps and all); the ones under
+# it are pulled into its column (`consume`).
+#
+# Any other layout, or a dwindle desk that does not cut cleanly, is tiled in
+# order and left to the layout. So is a fullscreen window, whose size says
+# nothing about its place.
+PRESET_LAYOUT_JQ='
+  def r3: . * 1000 | round / 1000;
+  def cut($lo; $hi):
+    sort_by(.[$lo]) as $s
+    | first(range(1; $s | length) as $k
+        | ($s[:$k] | map(.[$hi]) | max) as $edge
+        | ($s[$k:] | map(.[$lo]) | min) as $next
+        | select($next >= $edge - 8)
+        | { a: $s[:$k], b: $s[$k:], at: (($edge + $next) / 2),
+            lo: ($s | map(.[$lo]) | min), hi: ($s | map(.[$hi]) | max) }) // null;
+  def split:
+    (cut("x0"; "x1") | if . == null then null else . + { dir: "r" } end)
+    // (cut("y0"; "y1") | if . == null then null else . + { dir: "d" } end);
+  def first_leaf:
+    if length == 1 then .[0].i
+    else split as $c | if $c == null then .[0].i else $c.a | first_leaf end end;
+  def build:
+    if length <= 1 then []
+    else split as $c
+      | if $c == null then .[0].i as $anchor | [ .[1:][] | { tile: .i, onto: $anchor } ]
+        else [ { tile: ($c.b | first_leaf), onto: ($c.a | first_leaf), dir: $c.dir,
+                 ratio: ([1.9, ([0.1, 2 * ($c.at - $c.lo) / ($c.hi - $c.lo)] | max)] | min | r3) } ]
+             + ($c.a | build) + ($c.b | build)
+        end
+    end;
+  def columns:
+    sort_by(.x0, .y0)
+    | reduce .[] as $r ([];
+        if length > 0 and (($r.x0 - .[-1][0].x0) | fabs) <= 8 then .[-1] += [$r] else . + [[$r]] end)
+    | map(sort_by(.y0));
+  map(select(.fs | not)) as $placed
+  | map(select(.fs)) as $full
+  | ($placed
+     | if length == 0 then []
+       elif $layout == "dwindle" then [ { tile: first_leaf } ] + build
+       elif $layout == "scrolling" and $width > 0 then
+         columns as $cols
+         | [ range(0; $cols | length) as $k | $cols[$k] as $col
+             | { tile: $col[0].i, onto: (if $k == 0 then null else $cols[$k - 1][0].i end),
+                 width: (($col[0].x1 - $col[0].x0 + 2 * $gapsIn) / ($width - 2 * $gapsOut) | r3) },
+               ($col[1:][] | { tile: .i, onto: $col[0].i, consume: true }) ]
+       else sort_by(.y0, .x0) | map({ tile: .i })
+       end)
+  + ($full | map({ tile: .i }))'
+
+# The first of a gap option's values, or the default where there is no
+# Hyprland to ask.
+hypr_number() { # option default
+  local v
+  v=$(hyprctl getoption "$1" -j 2>/dev/null |
+    jq -r '.float // .int // ((.css // .custom // "") | split(" ")[0]) // empty' 2>/dev/null || true)
+  if [[ $v =~ ^[0-9]+(\.[0-9]+)?$ ]]; then echo "$v"; else echo "$2"; fi
+}
+
+layout_steps() { # layout monitor-width windows-json
+  jq -c --arg layout "$1" --argjson width "${2:-0}" \
+    --argjson gapsIn "$(hypr_number general:gaps_in 5)" --argjson gapsOut "$(hypr_number general:gaps_out 20)" \
+    "$PRESET_LAYOUT_JQ" <<<"$3"
+}
+
+# The layout a workspace tiles with now, which is the one to build for; the
+# one it had when saved, where Hyprland cannot say.
+layout_of() { # workspace saved
+  local live
+  live=$(workspaces_json | jq -r --argjson w "$1" '.[] | select(.id == $w) | .tiledLayout // empty' 2>/dev/null || true)
+  echo "${live:-${2:-dwindle}}"
+}
+
+# A workspace's tiled windows as PRESET_LAYOUT_JQ takes them, named by
+# whatever $ids gives for each index of the plan.
+layout_windows() { # plan workspace ids-json
+  jq -c --argjson w "$2" --argjson ids "$3" '
+    [ to_entries[]
+      | select(.value.workspace == $w and (.value.floating | not))
+      | $ids[.key | tostring] as $i | select($i != null)
+      | .value as $v
+      | { i: $i, x0: $v.at[0], y0: $v.at[1], x1: ($v.at[0] + $v.size[0]), y1: ($v.at[1] + $v.size[1]),
+          fs: (($v.fullscreen // 0) > 0) } ]' <<<"$1"
+}
+
+# Lua long brackets hold the pattern verbatim; only the regex needs escaping.
+regex_quote() { sed 's/[][\\.*^$+?(){}|]/\\&/g' <<<"$1"; }
+
+# Put the next window of this class straight onto its workspace, silently, so
+# it never flashes up on the screen being looked at. It is the pattern
+# omarchy-launch-about uses: one named rule, replaced before each launch and
+# switched off after. Every window arrives floating — the floating ones where
+# they belong, the tiled ones out of the way until their workspace is
+# arranged, all at once, in the shape it was saved in.
+PRESET_RULE="omarchy_workspaces_preset_rule"
+
+preset_rule() {
+  local w=$1 class ws effects
+  class=$(jq -r .class <<<"$w")
+  ws=$(jq -r .workspace <<<"$w")
+  # A rule's move is relative to the monitor, which is how `at` is stored.
+  effects=$(jq -r 'if .floating
+    then "float = true, size = { \(.size[0]), \(.size[1]) }, move = { \(.at[0]), \(.at[1]) }"
+    else "float = true" end' <<<"$w")
+  hyprctl eval "if $PRESET_RULE then $PRESET_RULE:set_enabled(false) end; $PRESET_RULE = hl.window_rule({ match = { class = [==[^($(regex_quote "$class"))\$]==] }, workspace = \"$ws silent\", $effects })" >/dev/null 2>&1 || true
+}
+
+preset_rule_off() {
+  hyprctl eval "if $PRESET_RULE then $PRESET_RULE:set_enabled(false) end; $PRESET_RULE = nil" >/dev/null 2>&1 || true
+}
+
+# A window of this class that nobody has claimed: one this restore opened.
+# Everything that was open when it started is claimed from the outset, so
+# nothing the user had open is ever mistaken for it.
+fresh_window() {
+  local a
+  while IFS= read -r a; do
+    if [[ -n $a && -z ${PRESET_TAKEN[$a]:-} ]]; then
+      echo "$a"
+      return
+    fi
+  done < <(clients_json | jq -r --arg c "$1" '.[] | select(.class == $c or .initialClass == $c) | .address')
+}
+
+await_window() {
+  local deadline=$((SECONDS + LAUNCH_TIMEOUT)) a
+  while ((SECONDS < deadline)); do
+    a=$(fresh_window "$1")
+    if [[ -n $a ]]; then
+      echo "$a"
+      return
+    fi
+    sleep 0.25
+  done
+}
+
+launch_argv() { # json array of argv
+  local argv=()
+  mapfile -t argv < <(jq -r '.[]' <<<"$1")
+  ((${#argv[@]})) || return 1
+  # Not with the restore's lock: an app that kept it open would stop every
+  # later restore for as long as the app runs.
+  setsid -f "${argv[@]}" >/dev/null 2>&1 </dev/null 9>&-
+}
+
+# A path that is executable, or a name on PATH.
+runnable() {
+  if [[ $1 == */* ]]; then [[ -x $1 ]]; else command -v "$1" >/dev/null 2>&1; fi
+}
+
+# Whether a desktop id still names an entry. Its dashes may stand for
+# subdirectories, as desktop_for writes them.
+desktop_exists() {
+  local id=$1 dir file
+  while IFS= read -r dir; do
+    if [[ -f $dir/$id ]]; then return 0; fi
+    [[ -d $dir ]] || continue
+    while IFS= read -r file; do
+      file=${file#"$dir"/}
+      if [[ ${file//\//-} == "$id" ]]; then return 0; fi
+    done < <(find "$dir" -mindepth 2 -name '*.desktop' 2>/dev/null)
+  done < <(application_dirs)
+  return 1
+}
+
+# How to open this window of the preset now, as a JSON argv — or nothing when
+# what opened it is gone: an app uninstalled since, or one of Omarchy's own
+# terminal windows, which an older version saved and this one does not
+# restore. A terminal's command is made here by terminal_argv, which checks
+# the rerun list, and never taken from the file as it stands.
+launch_now() {
+  local w=$1 class
+  class=$(jq -r .class <<<"$w")
+  case $(jq -r '.launch.via // "none"' <<<"$w") in
+    terminal)
+      if [[ ! $class =~ ^(org\.omarchy\.|TUI\.) ]] && runnable xdg-terminal-exec; then
+        terminal_argv "$class" "$(jq -r '.launch.cwd // ""' <<<"$w")" "$(jq -c '.launch.run // []' <<<"$w")"
+      fi ;;
+    webapp)
+      if runnable omarchy-launch-webapp; then jq -c '.launch.argv' <<<"$w"; fi ;;
+    desktop)
+      if desktop_exists "$(jq -r '.launch.argv[-1]' <<<"$w")"; then
+        jq -c '.launch.argv' <<<"$w"
+      elif runnable "$(jq -r '.launch.fallback[2] // ""' <<<"$w")"; then
+        jq -c '.launch.fallback' <<<"$w"
+      fi ;;
+    command)
+      if runnable "$(jq -r '.launch.argv[2] // ""' <<<"$w")"; then jq -c '.launch.argv' <<<"$w"; fi ;;
+  esac
+}
+
+# What to call the app while restoring: the desktop entry's name, the web
+# app's site, or else its class.
+app_label() {
+  local w=$1 name="" id dir
+  case $(jq -r '.launch.via // ""' <<<"$w") in
+    terminal) name=$(jq -r 'if .launch.run then "Terminal (\(.launch.run[0] | split("/")[-1]))" else "Terminal" end' <<<"$w") ;;
+    webapp) name=$(jq -r '.launch.argv[-1] // "" | sub("^[a-z]+://"; "") | sub("/.*$"; "")' <<<"$w") ;;
+    desktop)
+      id=$(jq -r '.launch.argv[-1]' <<<"$w")
+      while IFS= read -r dir; do
+        if [[ -f $dir/$id ]]; then
+          name=$(grep -m1 '^Name=' "$dir/$id" 2>/dev/null | cut -d= -f2- || true)
+          break
+        fi
+      done < <(application_dirs) ;;
+  esac
+  if [[ -z $name ]]; then name=$(jq -r .class <<<"$w"); fi
+  printf '%s\n' "$name"
+}
+
+# The float dispatcher only toggles, so it is sent only when the window is
+# the other way.
+set_floating() { # address true|false
+  local now
+  now=$(clients_json | jq -r --arg a "$1" '.[] | select(.address == $a) | .floating // false')
+  if [[ -n $now && $now != "$2" ]]; then dispatch "hl.dsp.window.float({ window = \"address:$1\" })"; fi
+}
+
+workspace_origin() {
+  local monitor
+  monitor=$(workspaces_json | jq -r --argjson w "$1" '.[] | select(.id == $w) | .monitor')
+  monitors_json | jq -r --arg m "$monitor" '
+    (map(select(.name == $m)) | first) // (map(select(.focused)) | first) // { x: 0, y: 0 }
+    | "\(.x) \(.y)"'
+}
+
+# Move a window onto its workspace. A floating one gets its size and place
+# back now. A tiled one is floated for the moment, out of the layout, and
+# tiled again when its workspace is arranged.
+place() {
+  local w=$1 a=$2 live ws floating pinned x y width height mx my
+  live=$(clients_json | jq -c --arg a "$a" '.[] | select(.address == $a)')
+  [[ -n $live ]] || return 0
+  read -r ws floating pinned x y width height <<<"$(jq -r '
+    "\(.workspace) \(.floating) \(.pinned // false) \(.at[0]) \(.at[1]) \(.size[0]) \(.size[1])"' <<<"$w")"
+
+  if [[ $(jq -r .workspace.id <<<"$live") != "$ws" ]]; then
+    dispatch "hl.dsp.window.move({ window = \"address:$a\", workspace = \"$ws\", follow = false })"
+  fi
+  if [[ $(jq -r '.fullscreen // 0' <<<"$live") != 0 ]]; then
+    dispatch "hl.dsp.window.fullscreen({ window = \"address:$a\" })"
+  fi
+  set_floating "$a" true
+  if [[ $floating == true ]]; then
+    read -r mx my <<<"$(workspace_origin "$ws")"
+    dispatch "hl.dsp.window.resize({ window = \"address:$a\", x = $width, y = $height })"
+    dispatch "hl.dsp.window.move({ window = \"address:$a\", x = $((mx + x)), y = $((my + y)) })"
+    if [[ $pinned == true && $(jq -r '.pinned // false' <<<"$live") != true ]]; then
+      dispatch "hl.dsp.window.pin({ window = \"address:$a\" })"
+    fi
+  fi
+}
+
+# Tile a workspace's windows back into the layout they were saved in, one
+# step of layout_steps at a time. They are all floating by now, so each one
+# tiled goes in beside the window focused — the one the step names.
+arrange() { # workspace steps-json
+  local ws=$1 step tile onto dir ratio width consume base delta
+  base=$(hypr_number dwindle:default_split_ratio 1)
+  dispatch "hl.dsp.focus({ workspace = \"$ws\" })"
+  while IFS= read -r step; do
+    read -r tile onto dir ratio width consume <<<"$(jq -r '
+      [.tile, (.onto // "-"), (.dir // "-"), (.ratio // "-"), (.width // "-"), (.consume // false)]
+      | map(tostring) | join(" ")' <<<"$step")"
+    if [[ $onto != - ]]; then dispatch "hl.dsp.focus({ window = \"address:$onto\" })"; fi
+    if [[ $dir != - ]]; then dispatch "hl.dsp.layout(\"preselect $dir\")"; fi
+    set_floating "$tile" false
+    # A new split starts at dwindle's default ratio; splitratio only moves it.
+    if [[ $ratio != - ]]; then
+      delta=$(awk -v r="$ratio" -v b="$base" 'BEGIN { d = r - b; if (d > 0.001 || d < -0.001) printf "%.3f", d }')
+      if [[ -n $delta ]]; then
+        dispatch "hl.dsp.focus({ window = \"address:$tile\" })"
+        dispatch "hl.dsp.layout(\"splitratio $delta\")"
+      fi
+    fi
+    if [[ $width != - ]]; then
+      dispatch "hl.dsp.focus({ window = \"address:$tile\" })"
+      dispatch "hl.dsp.layout(\"colresize $width\")"
+    fi
+    if [[ $consume == true ]]; then
+      dispatch "hl.dsp.focus({ window = \"address:$onto\" })"
+      dispatch 'hl.dsp.layout("consume")'
+    fi
+  done < <(jq -c '.[]' <<<"$2")
+}
+
+# "a, b and c"
+join_names() {
+  local out=$1
+  shift
+  while (($#)); do
+    if (($# == 1)); then out+=" and $1"; else out+=", $1"; fi
+    shift
+  done
+  printf '%s' "$out"
+}
+
+preset_restore() {
+  local name=$1 dry=$2 preset plan
+  preset=$(preset_get "$name")
+  plan=$(jq -cn --argjson want "$(jq -c .windows <<<"$preset")" --argjson open "$(clients_json)" "$PRESET_PLAN_JQ")
+  # What opens each window that is not open already — null for what is gone.
+  plan=$(jq -c '.[]' <<<"$plan" | while IFS= read -r w; do
+    if [[ $(jq -r '.reuse // ""' <<<"$w") != "" ]]; then
+      echo "$w"
+    else
+      jq -c --argjson now "$(launch_now "$w" | grep . || echo null)" '. + { now: $now }' <<<"$w"
+    fi
+  done | jq -cs .)
+
+  if ((dry)); then
+    jq -r '.[] | if .reuse then "reuse  \(.reuse) \(.class) → \(.workspace)"
+      elif .now == null then "gone   \(.class) → \(.workspace): not installed, would be removed from the preset"
+      else "launch \(.class) → \(.workspace): \(.now | join(" "))" end' <<<"$plan"
+    local ws ids
+    ids=$(jq -c '[to_entries[] | select(.value.reuse != null or .value.now != null)
+                  | { key: (.key | tostring), value: "\(.value.class)#\(.key)" }] | from_entries' <<<"$plan")
+    for ws in $(jq -r '[.[] | select(.floating | not) | .workspace] | unique | .[]' <<<"$plan"); do
+      echo "arrange $ws ($(layout_of "$ws" "$(jq -r --arg w "$ws" '.workspaces[$w].layout // ""' <<<"$preset")"))"
+      layout_steps "$(layout_of "$ws" "$(jq -r --arg w "$ws" '.workspaces[$w].layout // ""' <<<"$preset")")" \
+        "$(jq -r --arg w "$ws" '.workspaces[$w].monitor[0] // 0' <<<"$preset")" \
+        "$(layout_windows "$plan" "$ws" "$ids")" | jq -r '.[]
+        | "  " + .tile
+          + (if .dir then (if .dir == "r" then " right of " else " below " end) + .onto + ", ratio \(.ratio)"
+             elif .consume then " under " + .onto
+             elif .width then (if .onto then " after " + .onto else " first" end) + ", width \(.width)"
+             elif .onto then " next to " + .onto
+             else "" end)'
+    done
+    return 0
+  fi
+
+  # One restore at a time: a second click would launch everything twice.
+  mkdir -p "$STATE_DIR"
+  exec 9>"$STATE_DIR/preset-restore.lock"
+  flock -n 9 || die "a preset is already being restored"
+  local log="$STATE_DIR/preset-restore.log"
+  printf '%s restoring “%s”\n' "$(date '+%F %T')" "$name" >"$log"
+
+  declare -gA PRESET_TAKEN=()
+  local a
+  while IFS= read -r a; do
+    if [[ -n $a ]]; then PRESET_TAKEN[$a]=1; fi
+  done < <(clients_json | jq -r '.[].address')
+
+  local total headline="Restoring “$name”"
+  total=$(jq length <<<"$plan")
+  progress "$headline" "Opening $total window$( ((total == 1)) || echo s)…"
+
+  local w class ws label idx=-1 reused=0 opened=0 failed=() gone=() gone_at=()
+  local -A placed=()
+  while IFS= read -r w; do
+    idx=$((idx + 1))
+    class=$(jq -r .class <<<"$w")
+    ws=$(jq -r .workspace <<<"$w")
+    label=$(app_label "$w")
+    a=$(jq -r '.reuse // ""' <<<"$w")
+    if [[ -n $a ]]; then
+      place "$w" "$a"
+      placed[$idx]=$a
+      reused=$((reused + 1))
+      echo "reused $class → $ws" >>"$log"
+      continue
+    fi
+    if [[ $(jq -r '.now == null' <<<"$w") == true ]]; then
+      gone+=("$label")
+      gone_at+=("$idx")
+      echo "removed $class → $ws: it is not installed any more" >>"$log"
+      continue
+    fi
+
+    progress "$headline" "Opening $label on workspace $ws  ·  $((idx + 1)) of $total"
+    # A browser that restores its own session opens several windows for one
+    # launch; the ones this preset is still waiting for are already here.
+    a=$(fresh_window "$class")
+    if [[ -z $a ]]; then
+      preset_rule "$w"
+      if launch_argv "$(jq -c .now <<<"$w")"; then a=$(await_window "$class"); fi
+      if [[ -z $a ]] && [[ $(jq -r '.launch.via' <<<"$w") == desktop ]] &&
+        runnable "$(jq -r '.launch.fallback[2] // ""' <<<"$w")" &&
+        [[ $(jq -c '.now == .launch.fallback' <<<"$w") == false ]]; then
+        echo "  $class did not open from its desktop entry; trying its command line" >>"$log"
+        if launch_argv "$(jq -c '.launch.fallback' <<<"$w")"; then a=$(await_window "$class"); fi
+      fi
+      preset_rule_off
+    fi
+
+    if [[ -n $a ]]; then
+      PRESET_TAKEN[$a]=1
+      place "$w" "$a"
+      placed[$idx]=$a
+      opened=$((opened + 1))
+      echo "opened $class → $ws" >>"$log"
+    else
+      failed+=("$label")
+      echo "FAILED $class → $ws" >>"$log"
+    fi
+  done < <(jq -c '.[]' <<<"$plan")
+
+  # Everything is on its workspace now; tile each one back into its layout.
+  local ids="{}" k layout
+  if ((${#placed[@]})); then
+    ids=$(for k in "${!placed[@]}"; do printf '%s\t%s\n' "$k" "${placed[$k]}"; done |
+      jq -Rn '[inputs | split("\t") | { key: .[0], value: .[1] }] | from_entries')
+  fi
+  for ws in $(jq -r '[.[] | select(.floating | not) | .workspace] | unique | .[]' <<<"$plan"); do
+    layout=$(layout_of "$ws" "$(jq -r --arg w "$ws" '.workspaces[$w].layout // ""' <<<"$preset")")
+    progress "$headline" "Arranging workspace $ws"
+    arrange "$ws" "$(layout_steps "$layout" \
+      "$(jq -r --arg w "$ws" '.workspaces[$w].monitor[0] // 0' <<<"$preset")" \
+      "$(layout_windows "$plan" "$ws" "$ids")")"
+    echo "arranged $ws ($layout)" >>"$log"
+  done
+
+  # Fullscreen last: a fullscreen window in the middle of the arranging would
+  # have been in the way of every window tiled after it.
+  for k in "${!placed[@]}"; do
+    if [[ $(jq -r --argjson k "$k" '.[$k].fullscreen // 0' <<<"$plan") != 0 ]]; then
+      local mode=fullscreen
+      if [[ $(jq -r --argjson k "$k" '.[$k].fullscreen' <<<"$plan") == 1 ]]; then mode=maximized; fi
+      dispatch "hl.dsp.window.fullscreen({ window = \"address:${placed[$k]}\", mode = \"$mode\", action = \"set\" })"
+    fi
+  done
+
+  # Show what was on screen when it was saved, ending on the workspace that
+  # had focus. Each workspace lives on its own monitor, so focusing one shows
+  # it there.
+  local focused
+  focused=$(jq -r '.focused // empty' <<<"$preset")
+  while IFS= read -r ws; do
+    if [[ -n $ws && $ws != "$focused" ]]; then dispatch "hl.dsp.focus({ workspace = \"$ws\" })"; fi
+  done < <(jq -r '.shown // [] | .[]' <<<"$preset")
+  if [[ -n $focused ]]; then dispatch "hl.dsp.focus({ workspace = \"$focused\" })"; fi
+
+  # An app that is gone will not come back, so the preset stops asking for
+  # it. One that is there but did not open in time stays: next time it may.
+  if ((${#gone_at[@]})); then
+    presets_json | jq --arg n "$name" --argjson gone "$(printf '%s\n' "${gone_at[@]}" | jq -s .)" '
+      .presets[$n].windows |= [ to_entries[] | select(.key as $k | $gone | index($k) | not) | .value ]' |
+      write_presets
+  fi
+
+  local summary="$opened opened, $reused already open"
+  if ((${#gone[@]})); then
+    summary+=". Removed from the preset, as not installed any more: $(join_names "${gone[@]}")"
+  fi
+  if ((${#failed[@]})); then
+    say "Restored “$name” ($summary). Did not open: $(join_names "${failed[@]}")"
+    notify -u normal "Restored “$name”" "$summary. Did not open: $(join_names "${failed[@]}")"
+    return 1
+  fi
+  say "Restored “$name” ($summary)."
+  notify "Restored “$name”" "$summary."
+}
+
+cmd_preset() {
+  local sub=${1:-list}
+  (($#)) && shift
+  local name="" skip="[]" dry=0
+  while (($#)); do
+    case $1 in
+      --name)    name=${2?--name needs a value}; shift 2 ;;
+      --skip)    skip=${2?--skip needs a value}; shift 2 ;;
+      --dry-run) dry=1; shift ;;
+      --notify)  NOTIFY=1; shift ;;
+      --)        shift; name="$*"; break ;;
+      -*)        die "preset $sub: unknown option $1" ;;
+      *)         name="${name:+$name }$1"; shift ;;
+    esac
+  done
+
+  case $sub in
+    list) preset_list; return ;;
+    save | show | restore | delete) ;;
+    *) die "preset: unknown command '$sub' (save, list, show, restore, delete)" ;;
+  esac
+  name=$(preset_name "$name")
+  case $sub in
+    save)    preset_save "$name" "$skip" ;;
+    show)    preset_show "$name" ;;
+    restore) preset_restore "$name" "$dry" ;;
+    delete)  preset_delete "$name" ;;
+  esac
+}
+
 usage() {
   cat <<'USAGE'
 omarchy-workspaces — pin Hyprland workspaces to specific monitors
@@ -993,6 +1928,12 @@ omarchy-workspaces — pin Hyprland workspaces to specific monitors
   apply                            Generate, reload Hyprland, re-home workspaces
   edit                             Open the config in your editor
   set-layout --base64 <b64>        Replace the layout (used by the overlay)
+
+  preset save <name>               Save the open apps and where they sit
+  preset list                      List the saved presets
+  preset show <name>               Show what a preset would restore
+  preset restore <name> [--dry-run]  Reopen its apps on their workspaces
+  preset delete <name>             Delete a preset
 
 Config: ~/.config/omarchy/workspaces.json
 Plugin: ~/.config/omarchy/plugins/io.github.kimm-stensborg.workspaces
@@ -1029,6 +1970,7 @@ main() {
       cmd_bind_overview ||
         say "Nothing to bind: it is bound already, its key is taken, or it was removed (--force brings it back)." ;;
     set-layout) shift; cmd_set_layout "$@" ;;
+    preset)   shift; cmd_preset "$@" ;;
     -h|--help|help) usage ;;
     *) usage; exit 1 ;;
   esac

@@ -221,5 +221,179 @@ printf -- '-- mine\n' >"$WORK/hypr/bindings.lua"
 is "no shortcut, nothing printed"            "$(key us)" ''
 
 echo
+echo "presets"
+# Stand-ins for Hyprland's answers, and real processes for the windows to
+# belong to, so the launch recipes are read from /proc the way they are live.
+mkdir -p "$WORK/proj" "$WORK/data/applications"
+printf '[Desktop Entry]\nName=Writer\nExec=writer\nStartupWMClass=Writer-App\n' >"$WORK/data/applications/writer.desktop"
+# Its own session, so it has no terminal: run from one, its foreground would
+# otherwise be this script.
+setsid bash -c 'cd "$1" && sleep 60; :' _ "$WORK/proj" & TERM_PID=$!
+bash -c 'sleep 60; :' _ --app=https://mail.example/ & APP_PID=$!
+sleep 0.2
+cat >"$WORK/monitors.json" <<'JSON'
+[ { "id": 0, "name": "A", "x": 0,    "y": 0, "width": 2560, "height": 1440, "scale": 1,
+    "focused": true,  "activeWorkspace": { "id": 1 } },
+  { "id": 1, "name": "B", "x": 2560, "y": 0, "width": 2560, "height": 1440, "scale": 1,
+    "focused": false, "activeWorkspace": { "id": 5 } } ]
+JSON
+cat >"$WORK/workspaces.json" <<'JSON'
+[ { "id": 1, "monitorID": 0, "monitor": "A", "tiledLayout": "dwindle" },
+  { "id": 5, "monitorID": 1, "monitor": "B", "tiledLayout": "scrolling" } ]
+JSON
+# A Hyprland that answers nothing, so no test can reach the real one, and
+# the launchers a restore checks for.
+mkdir -p "$WORK/fakebin"
+printf '#!/bin/sh\nexit 1\n' >"$WORK/fakebin/hyprctl"
+for c in xdg-terminal-exec omarchy-launch-webapp uwsm-app; do printf '#!/bin/sh\nexit 0\n' >"$WORK/fakebin/$c"; done
+chmod +x "$WORK/fakebin/"*
+client() { # address class ws monitor pid floating title [x y] [tags] [stableId]
+  jq -cn --arg a "$1" --arg c "$2" --argjson ws "$3" --argjson m "$4" --argjson p "$5" \
+    --argjson f "$6" --arg t "$7" --argjson x "${8:-0}" --argjson y "${9:-0}" \
+    --argjson tags "${10:-[]}" --arg s "${11:-1}" '
+    { address: $a, class: $c, initialClass: $c, title: $t, pid: $p, stableId: $s,
+      workspace: { id: $ws, name: ($ws | tostring) }, monitor: $m, floating: $f,
+      at: [$x, $y], size: [800, 600], fullscreen: 0, pinned: false, hidden: false, tags: $tags }'
+}
+{
+  client 0xa1 Writer-App 1 0 $$ false "Draft" 0 0 '[]' 3
+  client 0xa2 foot 1 0 "$TERM_PID" false "shell" 0 0 '["terminal*"]' 2
+  client 0xa3 Mail-App 5 1 "$APP_PID" true "Mail" 2660 150 '[]' 4
+  client 0xb1 xdg-desktop-portal-gtk 1 0 $$ true "Open File"
+  client 0xb2 Writer-App 1 0 $$ true "Open File"
+  client 0xb3 Writer-App 1 0 $$ false "Preferences"
+  client 0xb4 foot -98 0 $$ false "scratch"
+  client 0xb5 Writer-App 5 1 $$ true "Choose a colour"
+  client 0xb6 org.omarchy.btop 1 0 $$ true "btop" 0 0 '["terminal*"]'
+} | jq -s . >"$WORK/clients.json"
+pre() { OMARCHY_WORKSPACES_PRESETS="$WORK/presets.json" OMARCHY_WORKSPACES_CLIENTS="$WORK/clients.json" \
+  OMARCHY_WORKSPACES_MONITORS="$WORK/monitors.json" OMARCHY_WORKSPACES_WORKSPACES="$WORK/workspaces.json" \
+  XDG_DATA_HOME="$WORK/data" XDG_DATA_DIRS="$WORK/none" PATH="$WORK/fakebin:$PATH" \
+  OMARCHY_WORKSPACES_STATE="$WORK/pstate" bash "$CLI" preset "$@" 2>&1; }
+pcfg() { jq -c "$1" "$WORK/presets.json"; }
+
+has "saving says what was kept" "$(pre save Work --skip '["0xb3"]')" "3 windows on 2 workspaces (5 left out)"
+is "dialogs, pickers, parented, special and Omarchy TUI windows are left out" \
+  "$(pcfg '.presets.Work.windows | map(.class)')" '["foot","Writer-App","Mail-App"]'
+is "each workspace in the order its windows opened" "$(pcfg '.presets.Work.windows | map(.workspace)')" '[1,1,5]'
+is "a floating window is kept relative to its monitor" "$(pcfg '.presets.Work.windows[2].at')" '[100,150]'
+is "what was on screen, and where focus was" "$(pcfg '.presets.Work | [.focused, .shown]')" '[1,[1,5]]'
+is "each workspace keeps its layout and its monitor's size" "$(pcfg '.presets.Work.workspaces')" \
+  '{"1":{"layout":"dwindle","monitor":[2560,1440]},"5":{"layout":"scrolling","monitor":[2560,1440]}}'
+is "a terminal keeps its directory" "$(pcfg '.presets.Work.windows[0].launch.cwd')" "\"$WORK/proj\""
+is "what it runs is kept only by name when not on the rerun list" \
+  "$(pcfg '.presets.Work.windows[0].launch | [.run, .skipped, has("argv")]')" '[null,"sleep 60",false]'
+has "and show says it will not run again" "$(pre show Work)" "(not run again: sleep 60)"
+is "an app is opened from its desktop entry" "$(pcfg '.presets.Work.windows[1].launch.argv')" '["uwsm-app","--","writer.desktop"]'
+is "a web app from its own URL" "$(pcfg '.presets.Work.windows[2].launch.argv')" '["omarchy-launch-webapp","https://mail.example/"]'
+is "or from its class, when the browser's process owns it" \
+  "$(OMARCHY_WORKSPACES_CLIENTS= bash -c "source <(sed -n '/^webapp_url()/,/^}/p' '$CLI'); webapp_url chrome-discord.com__channels_@me-Default")" \
+  'https://discord.com/channels/@me'
+unpack() { bash -c "source <(sed -n '/^unpack_argv()/,/^}/p' '$CLI'); unpack_argv '$1'"; }
+is "Chromium's one-string command line is split back up" \
+  "$(unpack '["/usr/bin/env --flag=a  --other"]')" '["/usr/bin/env","--flag=a","--other"]'
+is "but a real argument with spaces is left whole" "$(unpack '["no such file here"]')" '["no such file here"]'
+is "and so is an ordinary argv" "$(unpack '["/usr/bin/env","a b"]')" '["/usr/bin/env","a b"]'
+has "a list names it" "$(pre list)" "Work — 3 windows on 2 workspaces"
+jq '.rerun = ["sleep"]' "$WORK/presets.json" >"$WORK/presets.tmp" && mv "$WORK/presets.tmp" "$WORK/presets.json"
+pre save "  Work  " --skip '["0xb3"]' >/dev/null
+is "the same name, trimmed, replaces it" "$(pcfg '.presets | keys')" '["Work"]'
+is "a program added to the rerun list is kept to run again" "$(pcfg '.presets.Work.windows[0].launch.run')" '["sleep","60"]'
+is "and the list survives a save" "$(pcfg '.rerun')" '["sleep"]'
+pre save Home Desk >/dev/null
+is "a name can have spaces and more than one word" "$(pcfg '.presets | keys')" '["Home Desk","Work"]'
+has "an empty name is refused" "$(pre save '   ')" "needs a name"
+has "a runaway name is refused" "$(pre save "$(printf 'x%.0s' {1..41})")" "at most 40"
+has "a bad skip list is refused" "$(pre save X --skip '{}')" "JSON array"
+has "an unknown preset is named" "$(pre show Nope)" "no preset called “Nope”"
+pre delete "Home Desk" >/dev/null
+is "delete removes just that one" "$(pcfg '.presets | keys')" '["Work"]'
+
+# Restoring onto a desk that has one of its apps open already, on the wrong
+# workspace, and another window of the same app that the preset never had.
+{
+  client 0xc1 Writer-App 3 0 $$ false "Other"
+  client 0xc2 Writer-App 2 0 $$ false "Draft"
+  client 0xc3 foot -98 0 $$ false "scratch"
+} | jq -s . >"$WORK/clients.json"
+PLAN=$(pre restore Work --dry-run)
+has "an open window with the same title is reused" "$PLAN" "reuse  0xc2 Writer-App → 1"
+hasnt "and no other window of that app is taken" "$PLAN" "0xc1"
+hasnt "the scratchpad is never raided" "$PLAN" "0xc3"
+has "the terminal is launched as a shell in its directory" "$PLAN" \
+  "launch foot → 1: uwsm-app -- xdg-terminal-exec --app-id=foot --dir=$WORK/proj"
+has "running its program again, in a shell that stays after it" "$PLAN" \
+  "-e bash -c \"\$@\"; exec \"\${SHELL:-bash}\" _ sleep 60"
+has "and the web app" "$PLAN" "launch Mail-App → 5: omarchy-launch-webapp https://mail.example/"
+is "in the order the preset keeps" "$(grep -E '^(reuse|launch)' <<<"$PLAN" | awk '{print $2}' | tr '\n' ' ')" \
+  'foot 0xc2 Mail-App '
+
+# Only now: every save above reads its launch recipes from these processes.
+kill "$TERM_PID" "$APP_PID" 2>/dev/null
+
+# Presets written by hand: what an older version saved, and layouts to read.
+win() { # class workspace floating x y w h [launch]
+  local launch=${8:-}
+  if [[ -z $launch ]]; then launch='{"via":"command","argv":["uwsm-app","--","true"]}'; fi
+  jq -cn --arg c "$1" --argjson ws "$2" --argjson f "$3" --argjson x "$4" --argjson y "$5" \
+    --argjson w "$6" --argjson h "$7" --argjson l "$launch" '
+    { workspace: $ws, class: $c, title: "", floating: $f, fullscreen: 0, pinned: false,
+      at: [$x, $y], size: [$w, $h], launch: $l }'
+}
+mkpreset() { # name workspaces-json, windows on stdin
+  jq -s --arg n "$1" --argjson s "$2" '{ version: 1, presets: { ($n): { workspaces: $s, windows: . } } }' >"$WORK/presets.json"
+}
+echo '[]' >"$WORK/clients.json"
+
+{
+  win foot 1 false 0 0 800 600 '{"via":"terminal","cwd":"/tmp","run":["rm","-rf","x"],"argv":["uwsm-app","--","xdg-terminal-exec","--app-id=foot","--dir=/tmp","-e","rm","-rf","x"]}'
+  win Editor 1 false 0 0 800 600 '{"via":"terminal","cwd":"/tmp","run":["/usr/bin/nvim","notes.md"]}'
+  win org.omarchy.btop 1 true 0 0 800 600 '{"via":"terminal","argv":["uwsm-app","--","xdg-terminal-exec","--app-id=org.omarchy.btop","-e","btop"]}'
+  win Gone-App 1 false 0 0 800 600 '{"via":"desktop","argv":["uwsm-app","--","gone.desktop"]}'
+  win Moved-App 1 false 0 0 800 600 '{"via":"desktop","argv":["uwsm-app","--","moved.desktop"],"fallback":["uwsm-app","--","true"]}'
+  win No-Way 1 false 0 0 800 600 '{"via":"none"}'
+} | mkpreset Old '{}'
+PLAN=$(pre restore Old --dry-run)
+has "an old preset's terminal only opens a shell" "$PLAN" "launch foot → 1: uwsm-app -- xdg-terminal-exec --app-id=foot --dir=/tmp"
+hasnt "and never runs a command the rerun list does not allow" "$PLAN" "rm -rf"
+has "one it allows is run again" "$PLAN" "launch Editor → 1: uwsm-app -- xdg-terminal-exec --app-id=Editor --dir=/tmp -e bash -c"
+has "with its arguments" "$PLAN" "_ /usr/bin/nvim notes.md"
+has "an Omarchy TUI window from an old preset is dropped" "$PLAN" "gone   org.omarchy.btop"
+has "an app no longer installed is dropped" "$PLAN" "gone   Gone-App"
+has "one whose entry went falls back to its command line" "$PLAN" "launch Moved-App → 1: uwsm-app -- true"
+has "one with no way to open it is dropped" "$PLAN" "gone   No-Way"
+
+{
+  win A 1 false 0 0 1000 1000
+  win B 1 false 1010 0 490 495
+  win C 1 false 1010 505 490 495
+  win X 5 false 0 0 830 1000
+  win Y 5 false 850 0 1250 495
+  win Z 5 false 850 505 1250 495
+  win F 5 true 100 100 400 300
+} | mkpreset Desk '{"1":{"layout":"dwindle","monitor":[2560,1440]},"5":{"layout":"scrolling","monitor":[2560,1440]}}'
+PLAN=$(pre restore Desk --dry-run)
+has "dwindle is rebuilt split by split" "$PLAN" "$(printf 'arrange 1 (dwindle)\n  A#0\n  B#1 right of A#0, ratio 1.34\n  C#2 below B#1, ratio 1')"
+has "scrolling column by column, sized, the stacked ones pulled in" "$PLAN" \
+  "$(printf 'arrange 5 (scrolling)\n  X#3 first, width 0.333\n  Y#4 after X#3, width 0.5\n  Z#5 under Y#4')"
+hasnt "a floating window is left out of the layout" "$PLAN" "  F#6"
+
+# A real restore, with nothing to launch: one app is open already, the other
+# is not installed any more and is taken out of the preset.
+{
+  win Writer-App 1 false 0 0 800 600 '{"via":"desktop","argv":["uwsm-app","--","writer.desktop"]}'
+  win Gone-App 1 false 0 0 800 600 '{"via":"desktop","argv":["uwsm-app","--","gone.desktop"]}'
+} | mkpreset Back '{}'
+client 0xd1 Writer-App 1 0 $$ false "Draft" | jq -s . >"$WORK/clients.json"
+OUT=$(pre restore Back)
+has "a restore says how far it has got" "$OUT" "Arranging workspace 1"
+has "and what it removed" "$OUT" "0 opened, 1 already open. Removed from the preset, as not installed any more: Gone-App"
+is "the app that is gone is taken out of the preset" "$(pcfg '.presets.Back.windows | map(.class)')" '["Writer-App"]'
+
+printf 'nope' >"$WORK/presets.json"
+has "a broken presets file is refused, not overwritten" "$(pre save Again)" "not a version 1 presets file"
+is "and is left as it was" "$(cat "$WORK/presets.json")" 'nope'
+
+echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

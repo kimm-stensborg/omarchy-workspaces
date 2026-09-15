@@ -5,6 +5,8 @@ own. An overview shows every workspace at once, with live window thumbnails.
 
 ![Each monitor's bar showing only its own workspaces, above the setup panel that assigns them](preview.png)
 
+![The overview: every workspace at once, with live window thumbnails and the saved presets underneath](overview.png)
+
 - **Plugin ID:** `io.github.kimm-stensborg.workspaces`
 - **Kinds:** `bar-widget`, `overlay`, `service`
 - **License:** MIT
@@ -54,8 +56,6 @@ shortcut from `bindings.lua`.
 - **Undocking moves workspaces** to the nearest monitor, and back on return.
 
 ## The overview
-
-![Every workspace at once, with live window thumbnails](overview.png)
 
 Open it with **󰖳** in the bar or **`SUPER` + the key left of `1`**.
 

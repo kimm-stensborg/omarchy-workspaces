@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.kimm-stensborg.workspaces",
   "name": "Workspaces",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "author": "Kimm Stensborg",
   "license": "MIT",
-  "description": "Pins workspaces to monitors, shows each monitor its own workspaces in the bar, and previews every workspace full screen",
+  "description": "Pins workspaces to monitors, shows each monitor its own workspaces in the bar, previews every workspace full screen, and saves the open apps as presets to restore later",
   "kinds": [
     "bar-widget",
     "overlay",

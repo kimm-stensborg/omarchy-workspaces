@@ -423,6 +423,36 @@ has "a restore says how far it has got" "$OUT" "Arranging workspace 1"
 has "and what it removed" "$OUT" "0 opened, 1 already open. Removed from the preset, as not installed any more: Gone-App"
 is "the app that is gone is taken out of the preset" "$(pcfg '.presets.Back.windows | map(.class)')" '["Writer-App"]'
 
+# A real restore that launches: each app puts up its window a second after
+# it is started, and one never does.
+cat >"$WORK/fakebin/uwsm-app" <<'SH'
+#!/bin/sh
+[ "$1" = -- ] && shift
+case $1 in fake-app) exec "$@" ;; esac
+exit 0
+SH
+cat >"$WORK/fakebin/fake-app" <<SH
+#!/bin/bash
+sleep 1
+[[ \$1 == Never ]] && exit 0
+exec 9>"$WORK/clients.lock"; flock 9
+jq --arg c "\$1" --arg a "0x\$\$\$RANDOM" '. + [{ address: \$a, class: \$c, initialClass: \$c, title: "",
+  pid: 1, workspace: { id: 9, name: "9" }, monitor: 0, floating: true, at: [0, 0], size: [10, 10],
+  fullscreen: 0, pinned: false, hidden: false, tags: [] }]' "$WORK/clients.json" >"$WORK/clients.new"
+mv "$WORK/clients.new" "$WORK/clients.json"
+SH
+chmod +x "$WORK/fakebin/"*
+fake() { win "$1" "$2" false 0 0 800 600 "{\"via\":\"command\",\"argv\":[\"uwsm-app\",\"--\",\"fake-app\",\"$1\"]}"; }
+{ fake P 1; fake Q 1; fake R 5; fake P 5; fake Never 5; } | mkpreset Many '{}'
+echo '[]' >"$WORK/clients.json"
+START=$SECONDS
+OUT=$(OMARCHY_WORKSPACES_LAUNCH_TIMEOUT=2 pre restore Many)
+TOOK=$((SECONDS - START))
+has "every app that opens is placed" "$OUT" "4 opened, 0 already open"
+has "and one that never does is named" "$OUT" "Did not open: Never"
+is "the apps open side by side, two windows of one app in turn" "$((TOOK <= 3))" 1
+is "each window taken once" "$(jq '[.[].address] | unique | length' "$WORK/clients.json")" 4
+
 printf 'nope' >"$WORK/presets.json"
 has "a broken presets file is refused, not overwritten" "$(pre save Again)" "not a version 1 presets file"
 is "and is left as it was" "$(cat "$WORK/presets.json")" 'nope'

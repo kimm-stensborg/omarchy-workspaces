@@ -1540,50 +1540,45 @@ regex_quote() { sed 's/[][\\.*^$+?(){}|]/\\&/g' <<<"$1"; }
 
 # Put the next window of this class straight onto its workspace, silently, so
 # it never flashes up on the screen being looked at. It is the pattern
-# omarchy-launch-about uses: one named rule, replaced before each launch and
-# switched off after. Every window arrives floating — the floating ones where
-# they belong, the tiled ones out of the way until their workspace is
-# arranged, all at once, in the shape it was saved in.
-PRESET_RULE="omarchy_workspaces_preset_rule"
+# omarchy-launch-about uses — a named rule, replaced before each launch and
+# switched off after — with one rule per app, since several launch at once.
+# Every window arrives floating — the floating ones where they belong, the
+# tiled ones out of the way until their workspace is arranged, all at once,
+# in the shape it was saved in.
+PRESET_RULES="omarchy_workspaces_preset_rules"
 
 preset_rule() {
-  local w=$1 class ws effects
+  local w=$1 class ws effects key
   class=$(jq -r .class <<<"$w")
   ws=$(jq -r .workspace <<<"$w")
+  key="$PRESET_RULES[ [==[$class]==] ]"
   # A rule's move is relative to the monitor, which is how `at` is stored.
   effects=$(jq -r 'if .floating
     then "float = true, size = { \(.size[0]), \(.size[1]) }, move = { \(.at[0]), \(.at[1]) }"
     else "float = true" end' <<<"$w")
-  hyprctl eval "if $PRESET_RULE then $PRESET_RULE:set_enabled(false) end; $PRESET_RULE = hl.window_rule({ match = { class = [==[^($(regex_quote "$class"))\$]==] }, workspace = \"$ws silent\", $effects })" >/dev/null 2>&1 || true
+  hyprctl eval "$PRESET_RULES = $PRESET_RULES or {}; if $key then $key:set_enabled(false) end; $key = hl.window_rule({ match = { class = [==[^($(regex_quote "$class"))\$]==] }, workspace = \"$ws silent\", $effects })" >/dev/null 2>&1 || true
 }
 
-preset_rule_off() {
-  hyprctl eval "if $PRESET_RULE then $PRESET_RULE:set_enabled(false) end; $PRESET_RULE = nil" >/dev/null 2>&1 || true
+preset_rule_off() { # class
+  local key="$PRESET_RULES[ [==[$1]==] ]"
+  hyprctl eval "if $PRESET_RULES and $key then $key:set_enabled(false); $key = nil end" >/dev/null 2>&1 || true
+}
+
+preset_rules_off() {
+  hyprctl eval "if $PRESET_RULES then for _, r in pairs($PRESET_RULES) do r:set_enabled(false) end end; $PRESET_RULES = nil" >/dev/null 2>&1 || true
 }
 
 # A window of this class that nobody has claimed: one this restore opened.
 # Everything that was open when it started is claimed from the outset, so
 # nothing the user had open is ever mistaken for it.
-fresh_window() {
+fresh_window() { # clients-json class
   local a
   while IFS= read -r a; do
     if [[ -n $a && -z ${PRESET_TAKEN[$a]:-} ]]; then
       echo "$a"
       return
     fi
-  done < <(clients_json | jq -r --arg c "$1" '.[] | select(.class == $c or .initialClass == $c) | .address')
-}
-
-await_window() {
-  local deadline=$((SECONDS + LAUNCH_TIMEOUT)) a
-  while ((SECONDS < deadline)); do
-    a=$(fresh_window "$1")
-    if [[ -n $a ]]; then
-      echo "$a"
-      return
-    fi
-    sleep 0.25
-  done
+  done < <(jq -r --arg c "$2" '.[] | select(.class == $c or .initialClass == $c) | .address' <<<"$1")
 }
 
 launch_argv() { # json array of argv
@@ -1812,55 +1807,110 @@ preset_restore() {
   total=$(jq length <<<"$plan")
   progress "$headline" "Opening $total window$( ((total == 1)) || echo s)…"
 
-  local w class ws label idx=-1 reused=0 opened=0 failed=() gone=() gone_at=()
-  local -A placed=()
+  # What is open already is moved into place now, and what is gone is noted.
+  # The rest waits in one queue per app.
+  local w class ws a idx=-1 reused=0 opened=0 failed=() gone=() gone_at=() classes=() entry=() labels=()
+  local -A placed=() queue=() waiting=() since=() fell_back=() finished=()
   while IFS= read -r w; do
     idx=$((idx + 1))
+    entry[idx]=$w
     class=$(jq -r .class <<<"$w")
     ws=$(jq -r .workspace <<<"$w")
-    label=$(app_label "$w")
+    labels[idx]=$(app_label "$w")
     a=$(jq -r '.reuse // ""' <<<"$w")
     if [[ -n $a ]]; then
       place "$w" "$a"
       placed[$idx]=$a
       reused=$((reused + 1))
       echo "reused $class → $ws" >>"$log"
-      continue
-    fi
-    if [[ $(jq -r '.now == null' <<<"$w") == true ]]; then
-      gone+=("$label")
+    elif [[ $(jq -r '.now == null' <<<"$w") == true ]]; then
+      gone+=("${labels[idx]}")
       gone_at+=("$idx")
       echo "removed $class → $ws: it is not installed any more" >>"$log"
-      continue
-    fi
-
-    progress "$headline" "Opening $label on workspace $ws  ·  $((idx + 1)) of $total"
-    # A browser that restores its own session opens several windows for one
-    # launch; the ones this preset is still waiting for are already here.
-    a=$(fresh_window "$class")
-    if [[ -z $a ]]; then
-      preset_rule "$w"
-      if launch_argv "$(jq -c .now <<<"$w")"; then a=$(await_window "$class"); fi
-      if [[ -z $a ]] && [[ $(jq -r '.launch.via' <<<"$w") == desktop ]] &&
-        runnable "$(jq -r '.launch.fallback[2] // ""' <<<"$w")" &&
-        [[ $(jq -c '.now == .launch.fallback' <<<"$w") == false ]]; then
-        echo "  $class did not open from its desktop entry; trying its command line" >>"$log"
-        if launch_argv "$(jq -c '.launch.fallback' <<<"$w")"; then a=$(await_window "$class"); fi
-      fi
-      preset_rule_off
-    fi
-
-    if [[ -n $a ]]; then
-      PRESET_TAKEN[$a]=1
-      place "$w" "$a"
-      placed[$idx]=$a
-      opened=$((opened + 1))
-      echo "opened $class → $ws" >>"$log"
     else
-      failed+=("$label")
-      echo "FAILED $class → $ws" >>"$log"
+      if [[ -z ${queue[$class]+set} ]]; then classes+=("$class"); fi
+      queue[$class]+="$idx "
     fi
   done < <(jq -c '.[]' <<<"$plan")
+
+  # Every app is launched at once, each window sent to its workspace by a
+  # rule for its class, and each app gets LAUNCH_TIMEOUT to show one. The
+  # windows of one app go one after another: they cannot be told apart as
+  # they come, and a browser that brings its own session back has opened the
+  # later ones itself by the time their turn comes.
+  local clients said="" names left=() waits=()
+  while ((${#classes[@]})); do
+    clients=$(clients_json)
+    for class in "${classes[@]}"; do
+      idx=${waiting[$class]:-}
+      if [[ -n $idx ]]; then
+        w=${entry[idx]}
+        a=$(fresh_window "$clients" "$class")
+        if [[ -n $a ]]; then
+          PRESET_TAKEN[$a]=1
+          place "$w" "$a"
+          placed[$idx]=$a
+          opened=$((opened + 1))
+          echo "opened $class → $(jq -r .workspace <<<"$w")" >>"$log"
+          waiting[$class]=""
+        elif ((SECONDS - since[$class] >= LAUNCH_TIMEOUT)); then
+          if [[ -z ${fell_back[$idx]:-} && $(jq -r '.launch.via' <<<"$w") == desktop ]] &&
+            runnable "$(jq -r '.launch.fallback[2] // ""' <<<"$w")" &&
+            [[ $(jq -c '.now == .launch.fallback' <<<"$w") == false ]]; then
+            echo "  $class did not open from its desktop entry; trying its command line" >>"$log"
+            fell_back[$idx]=1
+            since[$class]=$SECONDS
+            launch_argv "$(jq -c '.launch.fallback' <<<"$w")" || since[$class]=$((SECONDS - LAUNCH_TIMEOUT))
+          else
+            failed+=("${labels[idx]}")
+            echo "FAILED $class → $(jq -r .workspace <<<"$w")" >>"$log"
+            waiting[$class]=""
+          fi
+        fi
+      fi
+      # This app's next window: one already here — a browser's own session
+      # coming back — or else launched now.
+      while [[ -z ${waiting[$class]:-} && -n ${queue[$class]:-} ]]; do
+        idx=${queue[$class]%% *}
+        queue[$class]=${queue[$class]#* }
+        w=${entry[idx]}
+        a=$(fresh_window "$clients" "$class")
+        if [[ -n $a ]]; then
+          PRESET_TAKEN[$a]=1
+          place "$w" "$a"
+          placed[$idx]=$a
+          opened=$((opened + 1))
+          echo "opened $class → $(jq -r .workspace <<<"$w")" >>"$log"
+          continue
+        fi
+        preset_rule "$w"
+        waiting[$class]=$idx
+        since[$class]=$SECONDS
+        # One that fails to start at all is out of time already.
+        launch_argv "$(jq -c .now <<<"$w")" || since[$class]=$((SECONDS - LAUNCH_TIMEOUT))
+      done
+      if [[ -z ${waiting[$class]:-} ]]; then
+        preset_rule_off "$class"
+        finished[$class]=1
+      fi
+    done
+    left=()
+    for class in "${classes[@]}"; do
+      if [[ -z ${finished[$class]:-} ]]; then left+=("$class"); fi
+    done
+    classes=("${left[@]}")
+    ((${#classes[@]})) || break
+
+    waits=()
+    for class in "${classes[@]}"; do waits+=("${labels[${waiting[$class]}]}"); done
+    names=$(join_names "${waits[@]}")
+    if [[ $names != "$said" ]]; then
+      progress "$headline" "Opening $names  ·  $((reused + opened + ${#failed[@]} + ${#gone[@]})) of $total done"
+      said=$names
+    fi
+    sleep 0.25
+  done
+  preset_rules_off
 
   # Everything is on its workspace now; tile each one back into its layout.
   local ids="{}" k layout

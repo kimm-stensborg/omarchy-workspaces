@@ -96,7 +96,8 @@ its apps open on their workspaces:
   skipped and taken out of the preset. One that is installed but does not
   open in time is kept, for next time.
 
-A notification shows how far the restore has got and ends with what it did.
+The apps open all at once, so a restore takes about as long as its slowest
+app. A notification shows how far it has got and ends with what it did.
 Dialogs, file pickers, password prompts and the scratchpad are left out. The
 layout is exact on a workspace that holds only the preset's windows — the
 desk after a reboot; other windows already there are left where they are.

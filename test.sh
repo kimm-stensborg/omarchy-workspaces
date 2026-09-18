@@ -328,6 +328,39 @@ has "and the web app" "$PLAN" "launch Mail-App → 5: omarchy-launch-webapp http
 is "in the order the preset keeps" "$(grep -E '^(reuse|launch)' <<<"$PLAN" | awk '{print $2}' | tr '\n' ' ')" \
   'foot 0xc2 Mail-App '
 
+# A browser runs all its windows from one process, started with the --app=
+# of whichever web app opened it first. That URL is no other window's.
+bash -c 'sleep 60; :' _ --app=https://discord.com/channels/@me & BROWSER_PID=$!
+printf '[Desktop Entry]\nName=Brave\nExec=brave\nStartupWMClass=brave-browser\n' >"$WORK/data/applications/brave-browser.desktop"
+{
+  client 0xd1 brave-x.com__-Default 1 0 "$BROWSER_PID" false "Home / X" 0 0 '[]' 5
+  client 0xd2 brave-browser 1 0 "$BROWSER_PID" false "Plugins - Brave" 0 0 '[]' 6
+  client 0xd3 brave-discord.com__channels_@me-Default 1 0 "$BROWSER_PID" false "Discord" 0 0 '[]' 7
+} | jq -s . >"$WORK/browser.json"
+cp "$WORK/clients.json" "$WORK/desk.json"
+cp "$WORK/browser.json" "$WORK/clients.json"
+pre save Browser >/dev/null
+is "a web app sharing the browser's process is opened from its own class" \
+  "$(pcfg '.presets.Browser.windows[0].launch.argv')" '["omarchy-launch-webapp","https://x.com/"]'
+is "the browser's own window from its desktop entry" \
+  "$(pcfg '.presets.Browser.windows[1].launch.argv')" '["uwsm-app","--","brave-browser.desktop"]'
+is "and the web app that started it from its exact URL" \
+  "$(pcfg '.presets.Browser.windows[2].launch.argv')" '["omarchy-launch-webapp","https://discord.com/channels/@me"]'
+kill "$BROWSER_PID" 2>/dev/null
+# As an older version saved them: every window with the first web app's URL.
+jq '.presets.Browser.windows |= map(.launch = { via: "webapp",
+  argv: ["omarchy-launch-webapp", "https://discord.com/channels/@me"] })' "$WORK/presets.json" >"$WORK/presets.tmp" &&
+  mv "$WORK/presets.tmp" "$WORK/presets.json"
+echo "[]" >"$WORK/clients.json"
+PLAN=$(pre restore Browser --dry-run)
+has "a preset saved that way opens each web app from its class" "$PLAN" \
+  "launch brave-x.com__-Default → 1: omarchy-launch-webapp https://x.com/"
+has "the browser from its desktop entry" "$PLAN" "launch brave-browser → 1: uwsm-app -- brave-browser.desktop"
+has "and keeps the URL that does fit" "$PLAN" \
+  "launch brave-discord.com__channels_@me-Default → 1: omarchy-launch-webapp https://discord.com/channels/@me"
+pre delete Browser >/dev/null
+mv "$WORK/desk.json" "$WORK/clients.json"
+
 # Only now: every save above reads its launch recipes from these processes.
 kill "$TERM_PID" "$APP_PID" 2>/dev/null
 

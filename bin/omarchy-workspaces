@@ -1234,6 +1234,33 @@ webapp_url() {
   printf 'https://%s%s\n' "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]//_//}"
 }
 
+# A browser's own windows — not a web app of it.
+browser_class() {
+  [[ ${1,,} =~ ^(chromium|google-chrome.*|brave-browser.*|microsoft-edge.*|vivaldi.*|opera.*|helium.*)$ ]]
+}
+
+# Whether a URL is the one this window is a web app of. A browser runs every
+# window from one process, whose command line keeps the --app= of whichever
+# web app happened to start it — so that URL is taken only when the class
+# names the same site and path, or the process is this window's alone and
+# not the browser itself. The class drops what an underscore stood for; the
+# URL keeps it, which is why it is worth having.
+webapp_fits() { # url class shared
+  local rest host path
+  [[ $3 != true ]] || return 1
+  if [[ -z $(webapp_url "$2") ]]; then
+    ! browser_class "$2"
+    return
+  fi
+  rest=${1#*://}
+  rest=${rest%%[?#]*}
+  host=${rest%%/*}
+  path=/${rest#"$host"}
+  path=${path#//}
+  path=/${path#/}
+  [[ $2 == *-"$host"_"${path//\//_}"-* ]]
+}
+
 application_dirs() {
   local dirs d
   printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/applications"
@@ -1282,6 +1309,7 @@ launch_recipe() {
   fi
   argv=$(proc_argv "$pid")
   url=$(jq -r 'map(select(startswith("--app="))) | first // "" | ltrimstr("--app=")' <<<"$argv")
+  if [[ -n $url ]] && ! webapp_fits "$url" "$class" "$(jq -r .shared <<<"$w")"; then url=""; fi
   [[ -n $url ]] || url=$(webapp_url "$class")
   if [[ -n $url ]]; then
     jq -cn --arg u "$url" '{ via: "webapp", argv: ["omarchy-launch-webapp", $u] }'
@@ -1601,7 +1629,19 @@ launch_now() {
         terminal_argv "$class" "$(jq -r '.launch.cwd // ""' <<<"$w")" "$(jq -c '.launch.run // []' <<<"$w")"
       fi ;;
     webapp)
-      if runnable omarchy-launch-webapp; then jq -c '.launch.argv' <<<"$w"; fi ;;
+      # A preset saved before webapp_fits may have the URL of another web
+      # app of the same browser: the class says which site it really was,
+      # and a browser's own window was never a web app at all.
+      local url saved
+      saved=$(jq -r '.launch.argv[1] // ""' <<<"$w")
+      url=$(webapp_url "$class")
+      if browser_class "$class"; then
+        url=$(desktop_for "$class")
+        if [[ -n $url ]]; then jq -cn --arg d "$url" '["uwsm-app", "--", $d]'; fi
+      elif runnable omarchy-launch-webapp; then
+        if [[ -n $url ]] && ! webapp_fits "$saved" "$class" false; then saved=$url; fi
+        jq -cn --arg u "$saved" '["omarchy-launch-webapp", $u]'
+      fi ;;
     desktop)
       if desktop_exists "$(jq -r '.launch.argv[-1]' <<<"$w")"; then
         jq -c '.launch.argv' <<<"$w"

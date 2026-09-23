@@ -126,4 +126,51 @@ test("numberRowSlot: the number row by position, 0 being ten", () => {
   assert.strictEqual(M.numberRowSlot(undefined), 0)
 })
 
+const X = { workspace: 1, class: "brave-x.com__-Default", title: "Home / X" }
+const YT = { workspace: 1, class: "brave-youtube.com__-Default", title: "Omarchy - YouTube" }
+const NVIM = { workspace: 2, class: "com.mitchellh.ghostty", title: "nvim", launch: { via: "terminal", run: ["/usr/bin/nvim", "."] } }
+const SHELL = { workspace: 3, class: "com.mitchellh.ghostty", title: "~" }
+
+test("appLabel: web apps by site, reverse-DNS by last part, terminals with their program", () => {
+  assert.strictEqual(M.appLabel(X), "x.com")
+  assert.strictEqual(M.appLabel({ class: "brave-www.youtube.com__-Default" }), "youtube.com")
+  assert.strictEqual(M.appLabel({ class: "brave-discord.com__channels_@me-Default" }), "discord.com")
+  assert.strictEqual(M.appLabel(NVIM), "ghostty · nvim")
+  assert.strictEqual(M.appLabel({ class: "foot" }), "foot")
+  assert.strictEqual(M.appLabel({ class: "", title: "Untitled" }), "Untitled")
+})
+
+test("presetPlan: the same app only, each open window used once", () => {
+  const open = [{ address: "0xa", class: "com.mitchellh.ghostty", title: "zsh", workspace: 5 }]
+  const plan = M.presetPlan([X, NVIM, SHELL], open)
+  assert.deepStrictEqual(plain(plan.map(w => w.reuse)), [null, "0xa", null])
+})
+
+test("presetPlan: an exact title wins over an earlier, vaguer match", () => {
+  const open = [{ address: "0xa", class: "com.mitchellh.ghostty", title: "~", workspace: 5 }]
+  assert.deepStrictEqual(plain(M.presetPlan([NVIM, SHELL], open).map(w => w.reuse)), [null, "0xa"])
+})
+
+test("presetPlan: one already on the right workspace is preferred", () => {
+  const open = [
+    { address: "0xa", class: "com.mitchellh.ghostty", title: "zsh", workspace: 5 },
+    { address: "0xb", class: "com.mitchellh.ghostty", title: "zsh", workspace: 3 }]
+  assert.strictEqual(M.presetPlan([SHELL], open)[0].reuse, "0xb")
+})
+
+test("presetPlan: the scratchpad is never taken", () => {
+  const open = [{ address: "0xa", class: "com.mitchellh.ghostty", title: "~", workspace: -98 }]
+  assert.strictEqual(M.presetPlan([SHELL], open)[0].reuse, null)
+})
+
+test("presetPreview: per workspace, launched, reused in place, or moved in", () => {
+  const open = [
+    { address: "0xa", class: X.class, title: "Home / X", workspace: 1 },
+    { address: "0xb", class: "com.mitchellh.ghostty", title: "nvim", workspace: 4 }]
+  const preview = plain(M.presetPreview([X, YT, NVIM], open))
+  assert.deepStrictEqual(preview, {
+    1: [{ label: "x.com", reused: true, moved: false }, { label: "youtube.com", reused: false, moved: false }],
+    2: [{ label: "ghostty · nvim", reused: true, moved: true }] })
+})
+
 if (failed) { console.log(failed + " failed"); process.exit(1) }

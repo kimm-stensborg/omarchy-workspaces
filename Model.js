@@ -122,3 +122,76 @@ function numberRowSlot(scanCode) {
   var code = Number(scanCode)
   return code >= 10 && code <= 19 ? code - 9 : 0
 }
+
+// ── preset preview ──────────────────────────────────────────────────────────
+
+// Which window already open stands in for which window of the preset, the
+// way `preset restore` decides it (PRESET_PLAN_JQ in the CLI): only the same
+// app qualifies; a first pass takes exact titles only, so a vaguer match never
+// steals one; within a pass a window already on the right workspace wins; and
+// the scratchpad's windows are never taken.
+//
+// want: the preset's windows, [{ workspace, class, title, ... }].
+// open: the windows open now, [{ address, class, title, workspace }].
+// Returns want's windows, each with `reuse` set to an address or null.
+function presetPlan(want, open) {
+  var candidates = open.filter(function (w) { return w.workspace > 0 })
+  var plan = want.map(function () { return null })
+  var claimed = {}
+  function claim(exact) {
+    for (var i = 0; i < want.length; i++) {
+      if (plan[i] !== null) continue
+      var hit = null
+      for (var j = 0; j < candidates.length; j++) {
+        var c = candidates[j]
+        if (c.class !== want[i].class || claimed[c.address]) continue
+        if (exact && c.title !== want[i].title) continue
+        if (hit === null || (c.workspace === want[i].workspace && hit.workspace !== want[i].workspace)) hit = c
+      }
+      if (hit !== null) { plan[i] = hit.address; claimed[hit.address] = true }
+    }
+  }
+  claim(true)
+  claim(false)
+  return want.map(function (w, i) {
+    var out = {}
+    for (var key in w) out[key] = w[key]
+    out.reuse = plan[i]
+    return out
+  })
+}
+
+// A name a person would say for the window. A web app is its site
+// (`brave-x.com__-Default` is x.com); a reverse-DNS class its last part
+// (`com.mitchellh.ghostty` is ghostty); a terminal brought back with a
+// program running is that program too.
+function appLabel(window) {
+  var cls = String(window.class || "")
+  var site = /^(?:brave|chromium|google-chrome|chrome|microsoft-edge|vivaldi)-([^_]+)__/.exec(cls)
+  var name = site ? site[1].replace(/^www\./, "")
+    : /^[a-z]+(\.[\w-]+){2,}$/i.test(cls) ? cls.split(".").pop()
+    : cls || String(window.title || "?")
+  var run = window.launch && window.launch.run
+  if (run && run.length) name += " · " + String(run[0]).split("/").pop()
+  return name
+}
+
+// What each workspace would hold after restoring: per workspace id, the
+// preset's windows by name, each marked `reused` when a window already open
+// stands in for it — and `moved` when that window comes from elsewhere — or
+// neither when it would be launched.
+function presetPreview(want, open) {
+  var where = {}
+  for (var i = 0; i < open.length; i++) where[open[i].address] = open[i].workspace
+  var out = {}
+  var plan = presetPlan(want, open)
+  for (var k = 0; k < plan.length; k++) {
+    var w = plan[k]
+    var id = Number(w.workspace)
+    if (!(id > 0)) continue
+    if (!out[id]) out[id] = []
+    out[id].push({ label: appLabel(w), reused: w.reuse !== null,
+                   moved: w.reuse !== null && where[w.reuse] !== id })
+  }
+  return out
+}

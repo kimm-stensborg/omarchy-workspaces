@@ -83,8 +83,11 @@ A preset is the desk as it is now: which apps are open on which workspace, in
 what order, and where the floating ones sit. Press **`S`** in the overview,
 name it, and press `Enter`. Saving under an existing name replaces it.
 
-The presets sit under the overview. **Click** one — after a reboot, say — and
-its apps open on their workspaces:
+The presets sit under the overview. **Point at** one, or reach it with the
+arrows, and the desk shows what it would bring back: each workspace lists its
+apps, `+` for one that would be opened, `↪` for an open window that would be
+moved there, and a bare name for one already in place. **Click** it — after a
+reboot, say — and its apps open on their workspaces:
 
 - **The layout comes back.** Once everything is open, each workspace is tiled
   again the way it was saved: dwindle's splits and their sizes, or scrolling's

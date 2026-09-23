@@ -1206,6 +1206,26 @@ Item {
     }
   }
 
+  // The preset the cursor is on — pointed at or reached with the arrows —
+  // shown over the desk before it is restored: per workspace, what it would
+  // hold. Null while no preset is selected.
+  readonly property string previewName: root.presetCursor >= 0 && root.presetCursor < root.presets.length
+    ? root.presets[root.presetCursor].name : ""
+  readonly property var presetPreview: {
+    if (!root.previewName || !root.presetFile) return null
+    var preset = root.presetFile.presets[root.previewName]
+    if (!preset) return null
+    var open = []
+    var values = Hyprland.toplevels ? Hyprland.toplevels.values : []
+    for (var i = 0; i < values.length; i++) {
+      var ipc = values[i].lastIpcObject || {}
+      open.push({ address: String(ipc.address || values[i].address || ""), class: String(ipc.class || ""),
+                  title: String(values[i].title || ipc.title || ""),
+                  workspace: values[i].workspace ? values[i].workspace.id : 0 })
+    }
+    return Model.presetPreview(preset.windows || [], open)
+  }
+
   readonly property var presets: {
     var out = []
     var all = root.presetFile ? root.presetFile.presets : ({})
@@ -1534,7 +1554,7 @@ Item {
       text: root.naming
         ? "Enter to save  ·  Esc to cancel"
         : root.presetCursor >= 0
-          ? "← → to choose  ·  Enter to pick  ·  Del to delete  ·  Tab or ↑ back to the desk  ·  Esc to close"
+          ? "+ opens  ·  ↪ moves here  ·  ← → to choose  ·  Enter to pick  ·  Del to delete  ·  Tab or ↑ back to the desk  ·  Esc to close"
           : "Click or press 1–0 to go there  ·  Shift+1–0 or drag to move a window  ·  arrows and Enter  ·  Tab for presets  ·  S to save a preset  ·  Esc to close"
       color: root.foreground
       opacity: 0.45
@@ -1703,7 +1723,7 @@ Item {
     // An empty workspace is still a place you can go, so it keeps its number
     // where the windows would be.
     Text {
-      visible: tile.windows.length === 0
+      visible: tile.windows.length === 0 && tile.planned === null
       anchors.centerIn: parent
       text: tile.ui.keyLabel(tile.modelData)
       color: tile.ui.foreground
@@ -1791,9 +1811,59 @@ Item {
       }
     }
 
+    // A preset being looked at covers the desk: each tile says what it would
+    // hold. `+` is launched, `↪` is an open window moved in, and a bare name
+    // is already here. A tile the preset leaves alone is only dimmed.
+    readonly property var planned: ui.presetPreview ? (ui.presetPreview[modelData] || []) : null
+
+    Rectangle {
+      visible: tile.planned !== null
+      anchors.fill: parent
+      color: Qt.rgba(tile.ui.background.r, tile.ui.background.g, tile.ui.background.b, 0.82)
+
+      Flow {
+        anchors.fill: parent
+        anchors.margins: Style.spacing.sm
+        anchors.topMargin: Style.spacing.sm + numberBadge.height + Style.spacing.sm
+        spacing: Style.spacing.xxs
+        clip: true
+
+        Repeater {
+          model: tile.planned || []
+
+          Rectangle {
+            id: plannedChip
+            required property var modelData
+            width: Math.min(plannedLabel.implicitWidth + Style.spacing.sm * 2, tile.width - Style.spacing.sm * 2)
+            height: plannedLabel.implicitHeight + Style.spacing.xxs * 2
+            radius: Style.cornerRadius
+            color: "transparent"
+            border.width: 1
+            border.color: plannedChip.modelData.reused ? tile.ui.hairline : tile.ui.accent
+
+            Text {
+              id: plannedLabel
+              anchors.fill: parent
+              anchors.leftMargin: Style.spacing.sm
+              anchors.rightMargin: Style.spacing.sm
+              verticalAlignment: Text.AlignVCenter
+              text: (plannedChip.modelData.reused ? (plannedChip.modelData.moved ? "↪ " : "") : "+ ")
+                + plannedChip.modelData.label
+              color: plannedChip.modelData.reused ? tile.ui.foreground : tile.ui.accent
+              font.family: tile.ui.fontFamily
+              font.pixelSize: Style.font.caption
+              textFormat: Text.PlainText
+              elide: Text.ElideRight
+            }
+          }
+        }
+      }
+    }
+
     // The number, over the windows, so a full workspace is still findable.
     Rectangle {
-      visible: tile.windows.length > 0
+      id: numberBadge
+      visible: tile.windows.length > 0 || tile.planned !== null
       anchors.top: parent.top
       anchors.left: parent.left
       anchors.margins: Style.spacing.sm

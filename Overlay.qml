@@ -1064,7 +1064,19 @@ Item {
       rows.push({ name: String(monitor.name), x: monitor.x, y: monitor.y,
                   width: size.width, height: size.height, workspaces: ids })
     }
-    return rows
+    return rows.length === 1 ? root.wrapRow(rows[0], 4) : rows
+  }
+
+  // A lone monitor's ten workspaces in one row would make every tile a
+  // sliver, so they wrap four to a row: 4-4-2. Only the first row carries
+  // the monitor's name; the rest continue it.
+  function wrapRow(row, perRow) {
+    var out = []
+    for (var i = 0; i < row.workspaces.length; i += perRow) {
+      out.push({ name: row.name, x: row.x, y: row.y, width: row.width, height: row.height,
+                 workspaces: row.workspaces.slice(i, i + perRow), continued: i > 0 })
+    }
+    return out
   }
 
   readonly property var hyprWorkspaces: Hyprland.workspaces ? Hyprland.workspaces.values : []
@@ -1331,7 +1343,10 @@ Item {
       if (rows.length === 0) return 0
       var availableWidth = width - margin * 2
       var availableHeight = height - margin * 2 - footerHeight
-      var best = (availableHeight - rows.length * labelHeight - (rows.length - 1) * rowGap) / rows.length
+      var chrome = 0
+      for (var r = 0; r < rows.length; r++)
+        chrome += rows[r].continued ? tileGap : labelHeight + (r > 0 ? rowGap : 0)
+      var best = (availableHeight - chrome) / rows.length
       for (var i = 0; i < rows.length; i++) {
         var count = rows[i].workspaces.length
         best = Math.min(best, (availableWidth - (count - 1) * tileGap) / (count * tileAspect))
@@ -1375,7 +1390,6 @@ Item {
     Column {
       anchors.centerIn: parent
       anchors.verticalCenterOffset: -overviewPanel.footerHeight / 2
-      spacing: overviewPanel.rowGap
 
       Repeater {
         model: root.overviewRows
@@ -1383,9 +1397,13 @@ Item {
         Column {
           id: overviewRow
           required property var modelData
+          required property int index
           spacing: Style.spacing.sm
+          topPadding: overviewRow.modelData.continued ? overviewPanel.tileGap
+            : overviewRow.index > 0 ? overviewPanel.rowGap : 0
 
           Text {
+            visible: !overviewRow.modelData.continued
             height: overviewPanel.labelHeight - Style.spacing.sm
             verticalAlignment: Text.AlignBottom
             text: root.displayName(overviewRow.modelData.name) + " · " + overviewRow.modelData.name

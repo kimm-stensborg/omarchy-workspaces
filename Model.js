@@ -1,8 +1,8 @@
 .pragma library
 
 // Pure logic for the overview: which workspaces go in which row, how big a
-// tile can be, where the arrow keys take the selection, and the dispatch that
-// moves a window dropped on another workspace. Nothing here touches QML, so
+// tile can be, where the arrow keys take the selection, which workspace a
+// number-row key names, and the dispatch that moves a window to another. Nothing here touches QML, so
 // `node test.js` covers it. Overlay.qml turns Hyprland's objects into the
 // plain data these functions take.
 
@@ -112,4 +112,13 @@ function moveWindow(address, from, to) {
   if (!/^(0x)?[0-9a-fA-F]+$/.test(hex) || !(id > 0) || id === Number(from)) return ""
   if (hex.indexOf("0x") !== 0) hex = "0x" + hex
   return "hl.dsp.window.move({ window = \"address:" + hex + "\", workspace = \"" + id + "\", follow = false })"
+}
+
+// The workspace a key on the number row stands for, 1–10, or 0 for any other
+// key. Read by position (xkb keycode, `1` is 10), as the workspace bindings
+// are: with Shift held, what the key types depends on the layout — `"` or
+// `#` or `§` — but which key it is does not.
+function numberRowSlot(scanCode) {
+  var code = Number(scanCode)
+  return code >= 10 && code <= 19 ? code - 9 : 0
 }

@@ -990,6 +990,11 @@ Item {
   property point dragPoint: Qt.point(0, 0)
   property int dropWorkspace: 0
 
+  // The window that had the focus when the overview opened: the one Shift and
+  // a number sends away. It is outlined in its tile, and stays the one after
+  // it has moved, so a second press can send it on again.
+  property var carriedWindow: null
+
   // When the overview last opened, and how long after that a summon counts
   // as the same press arriving twice rather than a second press. A quick tap
   // is well under this; two deliberate presses are well over it.
@@ -1025,6 +1030,7 @@ Item {
       || (Hyprland.focusedMonitor ? String(Hyprland.focusedMonitor.name || "") : "")
     root.overviewScreen = root.screenFor(name)
     root.overviewSelected = Hyprland.focusedWorkspace ? Hyprland.focusedWorkspace.id : 0
+    root.carriedWindow = Hyprland.activeToplevel
     root.overviewOpenedAt = Date.now()
     root.naming = false
     root.confirmingDelete = ""
@@ -1135,6 +1141,20 @@ Item {
     root.dropWorkspace = 0
     if (!dispatch) return
     Quickshell.execDetached(["hyprctl", "dispatch", dispatch])
+    retileTimer.restart()
+  }
+
+  // Shift and a number: the focused window goes to that workspace, and the
+  // selection follows it there so you see where it went.
+  function sendCarried(id) {
+    var window = root.carriedWindow
+    if (!window || root.overviewPosition(id).column === -1) return
+    var from = window.workspace ? window.workspace.id : 0
+    var dispatch = Model.moveWindow(window.address, from, id)
+    if (!dispatch) return
+    Quickshell.execDetached(["hyprctl", "dispatch", dispatch])
+    root.overviewSelected = id
+    root.presetCursor = -1
     retileTimer.restart()
   }
 
@@ -1348,6 +1368,8 @@ Item {
         else if (key === Qt.Key_Up || key === Qt.Key_K) root.moveSelection(-1, 0)
         else if (key === Qt.Key_Down || key === Qt.Key_J) root.moveSelection(1, 0)
         else if (key === Qt.Key_S) root.startNaming()
+        else if ((event.modifiers & Qt.ShiftModifier) && Model.numberRowSlot(event.nativeScanCode) > 0)
+          root.sendCarried(Model.numberRowSlot(event.nativeScanCode))
         else if (event.text.length === 1 && event.text >= "0" && event.text <= "9")
           root.jumpTo(event.text === "0" ? root.keySlots : parseInt(event.text))
         else return
@@ -1513,7 +1535,7 @@ Item {
         ? "Enter to save  ·  Esc to cancel"
         : root.presetCursor >= 0
           ? "← → to choose  ·  Enter to pick  ·  Del to delete  ·  Tab or ↑ back to the desk  ·  Esc to close"
-          : "Click or press 1–0 to go there  ·  arrows and Enter  ·  Tab for presets  ·  S to save a preset  ·  Esc to close"
+          : "Click or press 1–0 to go there  ·  Shift+1–0 or drag to move a window  ·  arrows and Enter  ·  Tab for presets  ·  S to save a preset  ·  Esc to close"
       color: root.foreground
       opacity: 0.45
       font.family: root.fontFamily
@@ -1736,6 +1758,15 @@ Item {
           anchors.fill: parent
           captureSource: tile.ui.overviewShown ? shotFrame.modelData.wayland : null
           live: true
+        }
+
+        Rectangle {
+          visible: tile.ui.carriedWindow === shotFrame.modelData
+          anchors.fill: parent
+          color: "transparent"
+          radius: Math.max(2, Style.cornerRadius / 2)
+          border.width: 2
+          border.color: tile.ui.accent
         }
 
         // Picked up, the window leaves a ghost under the pointer and dims

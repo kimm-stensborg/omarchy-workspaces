@@ -68,6 +68,8 @@ where it was and the overview stays open, so you can go on sorting.
 | Key | Action |
 |-----|--------|
 | `1`–`9`, `0` / click | go to that workspace |
+| `Shift` + `1`–`0` | move the focused window there (outlined; the focus stays) |
+| drag a window | move it to the workspace you drop it on |
 | arrows / `h` `j` `k` `l` | move the selection |
 | `Enter` | go to the selection, or restore the selected preset |
 | `Tab` / `↓` from the bottom row | move to the presets (`Tab` / `↑` back) |

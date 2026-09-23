@@ -117,4 +117,13 @@ test("moveWindow: nothing for a drop where it came from, off a tile, or no windo
   assert.strictEqual(M.moveWindow('0xabc", workspace = "1', 3, 4), "")
 })
 
+test("numberRowSlot: the number row by position, 0 being ten", () => {
+  assert.strictEqual(M.numberRowSlot(10), 1)
+  assert.strictEqual(M.numberRowSlot(12), 3)
+  assert.strictEqual(M.numberRowSlot(19), 10)
+  assert.strictEqual(M.numberRowSlot(9), 0)
+  assert.strictEqual(M.numberRowSlot(20), 0)
+  assert.strictEqual(M.numberRowSlot(undefined), 0)
+})
+
 if (failed) { console.log(failed + " failed"); process.exit(1) }

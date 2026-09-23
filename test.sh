@@ -128,11 +128,23 @@ echo
 echo "the layout is checked on paper, before any screen"
 doc() { OMARCHY_WORKSPACES_CONFIG="$WORK/ws.json" bash "$CLI" doctor 2>&1; }
 printf '%s' '{"version":1,"monitors":{"A":[1,2],"B":[2,3]}}' >"$WORK/ws.json"
-has "a workspace on two monitors"  "$(doc)" "workspace 2 is on two monitors"
+hasnt "a number shared by two never-both-connected entries is quiet on paper" \
+  "$(doc)" "is on two"
 printf '%s' '{"version":1,"monitors":{"A":[1,2]},"disabled":[7]}' >"$WORK/ws.json"
 has "disabled pointing nowhere"    "$(doc)" "disabled workspace 7 is not in the layout"
 seed
 hasnt "a sound layout is quiet"    "$(doc)" "is on two monitors"
+
+echo
+echo "two monitors connected at once really do conflict"
+printf '%s' '[
+  { "name": "A", "description": "" },
+  { "name": "B", "description": "" }
+]' >"$WORK/mons.json"
+printf '%s' '{"version":1,"monitors":{"A":[1,2],"B":[2,3]}}' >"$WORK/ws.json"
+docm() { OMARCHY_WORKSPACES_CONFIG="$WORK/ws.json" OMARCHY_WORKSPACES_MONITORS="$WORK/mons.json" bash "$CLI" doctor 2>&1; }
+has "the shared number is flagged once both its monitors answer" \
+  "$(docm)" "workspace 2 is on two monitors that are both connected right now"
 
 echo
 echo "a monitor that is not there"
@@ -142,6 +154,56 @@ OMARCHY_WORKSPACES_CONFIG="$WORK/ws.json" OMARCHY_WORKSPACES_LUA="$WORK/ws.lua" 
 has "still gets a group in the Lua" "$(cat "$WORK/ws.lua")" 'selector = "desc:NOT-PLUGGED-IN"'
 has "and the reflow that places it" "$(cat "$WORK/ws.lua")" "local function placement()"
 has "nearest-neighbour, left first"  "$(cat "$WORK/ws.lua")" "(i > from and 1 or 0)"
+
+echo
+echo "two absent locations sharing workspace numbers don't both reflow"
+# Two "desks" that are never plugged in together (home vs. work), sharing
+# workspace numbers, plus a shared laptop panel. Only the work pair and the
+# laptop are "connected" in the mock below — the same shape as a real report
+# of the bar showing every workspace on the laptop screen once the home
+# monitors were unplugged.
+printf '%s' '{
+  "version": 1,
+  "monitors": {
+    "desc:Home Monitor Left SERIALC": [1, 2],
+    "desc:Home Monitor Right SERIALD": [3, 4],
+    "desc:Shared Laptop Panel": [9, 10],
+    "desc:Work Monitor Left SERIALA": [1, 2],
+    "desc:Work Monitor Right SERIALB": [3, 4]
+  }
+}' >"$WORK/ws.json"
+OMARCHY_WORKSPACES_CONFIG="$WORK/ws.json" OMARCHY_WORKSPACES_LUA="$WORK/ws.lua" \
+  bash "$CLI" generate >/dev/null 2>&1
+
+if command -v lua >/dev/null; then
+  cat >"$WORK/mock.lua" <<'MOCK'
+hl = {}
+function hl.get_monitors()
+  return {
+    { name = "LAPTOP", description = "Shared Laptop Panel" },
+    { name = "EXT-1", description = "Work Monitor Left SERIALA" },
+    { name = "EXT-2", description = "Work Monitor Right SERIALB" },
+  }
+end
+local calls = {}
+function hl.workspace_rule(t) calls[#calls + 1] = t.workspace .. ":" .. t.monitor end
+function hl.unbind() end
+function hl.on() end
+function hl.timer() end
+dofile(arg[1])
+table.sort(calls)
+for _, c in ipairs(calls) do print(c) end
+MOCK
+  RESULT=$(lua "$WORK/mock.lua" "$WORK/ws.lua" 2>&1)
+  is "each workspace lands on exactly one monitor" "$(wc -l <<<"$RESULT" | tr -d ' ')" "6"
+  has "1 goes to the connected work monitor"        "$RESULT" $'1:EXT-1'
+  has "3 goes to the connected work monitor"        "$RESULT" $'3:EXT-2'
+  has "9 stays on the laptop"                       "$RESULT" $'9:LAPTOP'
+  hasnt "1 does not also land on the laptop"        "$RESULT" $'1:LAPTOP'
+  hasnt "9 does not also land on a work monitor"    "$RESULT" $'9:EXT-1'
+else
+  printf '  - skipped: lua not installed (5 checks)\n'
+fi
 
 echo
 echo "config guards"

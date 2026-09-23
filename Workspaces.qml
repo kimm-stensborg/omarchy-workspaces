@@ -151,11 +151,30 @@ BarWidget {
       return best
     }
 
+    // A workspace belongs to whichever configured entry is actually
+    // connected, however the config orders the entries — a plugged-in
+    // monitor's own workspaces are never up for grabs, so they are claimed
+    // first, in one pass over every present monitor, before anything
+    // reflows. Only a workspace still unclaimed after that reflows onto the
+    // nearest present monitor, and only once: two absent entries that happen
+    // to name the same workspace — two locations sharing a number, say —
+    // would otherwise both land on the same screen instead of one of them
+    // finding it already spoken for.
+    var claimed = {}
     var mine = []
+    for (var p2 = 0; p2 < present.length; p2++) {
+      var own = groups[present[p2]].workspaces
+      for (var w = 0; w < own.length; w++) claimed[own[w]] = true
+      if (groups[present[p2]].name === name) mine = mine.concat(own)
+    }
     for (var g = 0; g < groups.length; g++) {
-      var target = groups[g].name ? g : nearest(g)
+      if (groups[g].name) continue
+      var target = nearest(g)
       if (groups[target].name !== name) continue
-      mine = mine.concat(groups[g].workspaces)
+      for (var k = 0; k < groups[g].workspaces.length; k++) {
+        var id = groups[g].workspaces[k]
+        if (!claimed[id]) { mine.push(id); claimed[id] = true }
+      }
     }
     return mine
   }

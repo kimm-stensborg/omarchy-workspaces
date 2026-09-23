@@ -383,11 +383,35 @@ local function placement()
     index[live[i].name] = #out + 1
     out[#out + 1] = { monitor = live[i], workspaces = {} }
   end
+
+  -- A workspace belongs to whichever configured entry is actually connected,
+  -- however the layout orders the entries — a plugged-in monitor's own
+  -- workspaces are never up for grabs, so they are claimed first, in one pass
+  -- over every present monitor, before anything reflows. Only a workspace
+  -- still unclaimed after that reflows onto the nearest monitor that is
+  -- present, and only once: two absent entries that happen to name the same
+  -- workspace — two locations sharing a number, say — would otherwise both
+  -- pile it onto whichever present monitor is nearest, instead of one of them
+  -- finding it already spoken for.
+  local claimed = {}
+  for _, i in ipairs(present) do
+    local slot = out[index[live[i].name]]
+    for _, ws in ipairs(monitors[i].workspaces) do
+      if not disabled[ws] then
+        slot.workspaces[#slot.workspaces + 1] = ws
+        claimed[ws] = true
+      end
+    end
+  end
   for i, group in ipairs(monitors) do
-    local target = live[i] and i or nearest(i)
-    local slot = out[index[live[target].name]]
-    for _, ws in ipairs(group.workspaces) do
-      if not disabled[ws] then slot.workspaces[#slot.workspaces + 1] = ws end
+    if not live[i] then
+      local slot = out[index[live[nearest(i)].name]]
+      for _, ws in ipairs(group.workspaces) do
+        if not disabled[ws] and not claimed[ws] then
+          slot.workspaces[#slot.workspaces + 1] = ws
+          claimed[ws] = true
+        end
+      end
     end
   end
   for _, slot in ipairs(out) do table.sort(slot.workspaces) end
@@ -699,19 +723,20 @@ cmd_doctor() {
     || bad "hyprland.lua does not require hypr.workspaces — no rule is being applied"
 
   # ── the layout itself, before anything is compared to a screen ───────────
+  #
+  # A workspace named under more than one monitor entry is not, on its own, a
+  # fault: placement gives it exactly one home, favouring whichever entry is
+  # actually connected, which is exactly how two locations that are never
+  # plugged in together — home and work monitors sharing a number — are meant
+  # to share a config. It only becomes ambiguous when two of its entries are
+  # connected at once, which needs a screen to answer and is checked below.
   local faults
   faults=$(jq -r '
     ([.monitors[][]]) as $all
     | (
-        # A workspace on two monitors at once has no home, which is the one
-        # thing this plugin promises.
-        ( $all | group_by(.) | map(select(length > 1) | .[0]) | sort
-          | if length > 0 then
-              [ "workspace " + (map(tostring) | join(", ")) + " is on two monitors" ]
-            else [] end )
         # Switching off, or pinning the layout of, a workspace the layout never
         # places is a line that will never do anything.
-        + ( ((.disabled // []) - ($all | unique)) | sort
+        ( ((.disabled // []) - ($all | unique)) | sort
             | if length > 0 then
                 [ "disabled workspace " + (map(tostring) | join(", ")) + " is not in the layout" ]
               else [] end )
@@ -731,6 +756,22 @@ cmd_doctor() {
     say ""
     echo "$DOCTOR_PROBLEMS problem(s)." >&2
     return 1
+  fi
+
+  # A workspace whose entries are only ambiguous on paper is fine, per above —
+  # but if two of them resolve to a monitor that is plugged in right now, it
+  # really does have two homes at once, which the reflow that resolves the
+  # paper case cannot rescue.
+  local live_selectors conflicts
+  live_selectors=$(jq -r '.monitors | keys[]' "$CONFIG" | while IFS= read -r sel; do
+    [[ -n $(resolve_selector "$sel") ]] && printf '%s\n' "$sel"
+    true # the test above is false for most selectors; pipefail must not see that as the loop failing
+  done | jq -R -s -c 'split("\n") | map(select(length > 0))')
+  conflicts=$(jq -c --argjson live "$live_selectors" '
+    [ .monitors | to_entries[] | select(.key as $k | $live | index($k) != null) | .value[] ]
+    | group_by(.) | map(select(length > 1) | .[0]) | sort' "$CONFIG")
+  if [[ $(jq 'length' <<<"$conflicts") -gt 0 ]]; then
+    bad "workspace $(jq -r 'map(tostring) | join(", ")' <<<"$conflicts") is on two monitors that are both connected right now"
   fi
 
   # ── live state, gathered once ─────────────────────────────────────────────

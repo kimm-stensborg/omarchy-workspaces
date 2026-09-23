@@ -62,6 +62,9 @@ Open it with **󰖳** in the bar or **`SUPER` + the key left of `1`**.
 Each monitor gets a row of its workspaces. With only one monitor they wrap
 four to a row instead, 4-4-2, so the tiles stay big enough to read.
 
+**Drag** a window onto another workspace to move it there. The focus stays
+where it was and the overview stays open, so you can go on sorting.
+
 | Key | Action |
 |-----|--------|
 | `1`–`9`, `0` / click | go to that workspace |
@@ -174,5 +177,6 @@ lists the ones that are off.
 
 ```bash
 ./test.sh
+node test.js
 omarchy plugin validate .
 ```

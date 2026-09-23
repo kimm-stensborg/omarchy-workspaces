@@ -5,6 +5,7 @@ import Quickshell.Wayland
 import Quickshell.Hyprland
 import qs.Commons
 import qs.Ui
+import "Model.js" as Model
 
 // Visual workspace-to-monitor editor.
 //
@@ -176,6 +177,8 @@ Item {
   }
 
   function dismiss() {
+    root.dragWindow = null
+    root.dropWorkspace = 0
     root.close()
     if (root.shell && typeof root.shell.hide === "function") root.shell.hide(root.pluginId)
   }
@@ -977,6 +980,16 @@ Item {
   property var overviewScreen: null
   property int overviewSelected: 0
 
+  // A window being dragged to another workspace: the window, the workspace it
+  // left, its size in the tile it came from, where it was picked up within
+  // itself, where the pointer is now, and the workspace under the pointer.
+  property var dragWindow: null
+  property int dragFrom: 0
+  property size dragSize: Qt.size(0, 0)
+  property point dragGrab: Qt.point(0, 0)
+  property point dragPoint: Qt.point(0, 0)
+  property int dropWorkspace: 0
+
   // When the overview last opened, and how long after that a summon counts
   // as the same press arriving twice rather than a second press. A quick tap
   // is well under this; two deliberate presses are well over it.
@@ -1038,45 +1051,23 @@ Item {
       : { width: width, height: height }
   }
 
-  // One row per monitor, left to right, holding the workspaces Hyprland has
-  // on it. Special workspaces (negative ids) are scratchpads, not places, and
-  // a monitor with nothing on it gets no row.
+  // The overview's rows, from Model.overviewRows: one per monitor, or a lone
+  // monitor's wrapped four to a row.
   readonly property var overviewRows: {
     if (!root.overviewShown) return []
     var monitors = []
     var values = Hyprland.monitors ? Hyprland.monitors.values : []
-    for (var i = 0; i < values.length; i++) monitors.push(values[i])
-    monitors.sort(function (left, right) { return (left.x - right.x) || (left.y - right.y) })
-
-    var workspaces = root.hyprWorkspaces
-    var rows = []
-    for (var m = 0; m < monitors.length; m++) {
-      var monitor = monitors[m]
-      var ids = []
-      for (var w = 0; w < workspaces.length; w++) {
-        var workspace = workspaces[w]
-        if (workspace.id > 0 && workspace.monitor && workspace.monitor.name === monitor.name)
-          ids.push(workspace.id)
-      }
-      if (ids.length === 0) continue
-      ids.sort(function (a, b) { return a - b })
-      var size = root.logicalSize(monitor)
-      rows.push({ name: String(monitor.name), x: monitor.x, y: monitor.y,
-                  width: size.width, height: size.height, workspaces: ids })
+    for (var i = 0; i < values.length; i++) {
+      var size = root.logicalSize(values[i])
+      monitors.push({ name: String(values[i].name), x: values[i].x, y: values[i].y,
+                      width: size.width, height: size.height })
     }
-    return rows.length === 1 ? root.wrapRow(rows[0], 4) : rows
-  }
-
-  // A lone monitor's ten workspaces in one row would make every tile a
-  // sliver, so they wrap four to a row: 4-4-2. Only the first row carries
-  // the monitor's name; the rest continue it.
-  function wrapRow(row, perRow) {
-    var out = []
-    for (var i = 0; i < row.workspaces.length; i += perRow) {
-      out.push({ name: row.name, x: row.x, y: row.y, width: row.width, height: row.height,
-                 workspaces: row.workspaces.slice(i, i + perRow), continued: i > 0 })
+    var workspaces = []
+    var live = root.hyprWorkspaces
+    for (var w = 0; w < live.length; w++) {
+      workspaces.push({ id: live[w].id, monitor: live[w].monitor ? String(live[w].monitor.name) : "" })
     }
-    return out
+    return Model.overviewRows(monitors, workspaces)
   }
 
   readonly property var hyprWorkspaces: Hyprland.workspaces ? Hyprland.workspaces.values : []
@@ -1120,17 +1111,8 @@ Item {
     return out
   }
 
-  function overviewPosition(id) {
-    var rows = root.overviewRows
-    for (var r = 0; r < rows.length; r++) {
-      var column = rows[r].workspaces.indexOf(id)
-      if (column !== -1) return { row: r, column: column }
-    }
-    return { row: 0, column: -1 }
-  }
+  function overviewPosition(id) { return Model.position(root.overviewRows, id) }
 
-  // Left and right run on into the next row, so every tile is reachable with
-  // two keys; up and down keep the column as far as the row is long.
   function moveSelection(rowStep, columnStep) {
     // In the preset row, left and right walk it and up leaves it.
     if (root.presetCursor >= 0) {
@@ -1139,26 +1121,30 @@ Item {
         root.presetCursor = Math.max(0, Math.min(root.presets.length, root.presetCursor + columnStep))
       return
     }
-    var rows = root.overviewRows
-    if (rows.length === 0) return
-    var at = root.overviewPosition(root.overviewSelected)
-    // Down from the bottom row goes on into the presets, below the desk.
-    if (rowStep > 0 && at.row === rows.length - 1) {
-      root.presetCursor = 0
-      return
-    }
-    var row = at.row
-    var column = at.column + columnStep
-    if (column < 0 && row > 0 && columnStep !== 0) {
-      row--
-      column = rows[row].workspaces.length - 1
-    } else if (column >= rows[row].workspaces.length && row < rows.length - 1) {
-      row++
-      column = 0
-    }
-    row = Math.max(0, Math.min(rows.length - 1, row + rowStep))
-    column = Math.max(0, Math.min(rows[row].workspaces.length - 1, column))
-    root.overviewSelected = rows[row].workspaces[column]
+    var next = Model.step(root.overviewRows, root.overviewSelected, rowStep, columnStep)
+    if (next.presets) root.presetCursor = 0
+    else root.overviewSelected = next.selected
+  }
+
+  // A window dropped on another workspace goes there without the focus
+  // following it: the overview stays open, and you can carry on sorting.
+  function dropWindow() {
+    var ipc = root.dragWindow ? root.dragWindow.lastIpcObject || {} : {}
+    var dispatch = Model.moveWindow(ipc.address, root.dragFrom, root.dropWorkspace)
+    root.dragWindow = null
+    root.dropWorkspace = 0
+    if (!dispatch) return
+    Quickshell.execDetached(["hyprctl", "dispatch", dispatch])
+    retileTimer.restart()
+  }
+
+  // The window's workspace changes with Hyprland's event, but where the
+  // windows left behind now sit arrives only on asking.
+  Timer {
+    id: retileTimer
+    interval: 150
+    repeat: false
+    onTriggered: Hyprland.refreshToplevels()
   }
 
   // The same dispatch the bar uses. A pinned workspace takes focus to its own
@@ -1327,32 +1313,14 @@ Item {
     // Every tile is the same size, in the widest monitor's shape, so the
     // columns line up and no workspace looks lesser for its screen. A
     // narrower monitor's picture sits centred inside its tile.
-    readonly property real tileAspect: {
-      var rows = root.overviewRows
-      if (rows.length === 0) return 16 / 9
-      var widest = 0
-      for (var i = 0; i < rows.length; i++) widest = Math.max(widest, rows[i].width / rows[i].height)
-      return widest
-    }
+    readonly property real tileAspect: Model.tileAspect(root.overviewRows)
 
-    // The largest height that lets the rows stack and the longest row fit.
-    // Two workspaces on a big screen would otherwise fill it, and past a
-    // point a bigger tile is not a clearer one.
-    readonly property real tileHeight: {
-      var rows = root.overviewRows
-      if (rows.length === 0) return 0
-      var availableWidth = width - margin * 2
-      var availableHeight = height - margin * 2 - footerHeight
-      var chrome = 0
-      for (var r = 0; r < rows.length; r++)
-        chrome += rows[r].continued ? tileGap : labelHeight + (r > 0 ? rowGap : 0)
-      var best = (availableHeight - chrome) / rows.length
-      for (var i = 0; i < rows.length; i++) {
-        var count = rows[i].workspaces.length
-        best = Math.min(best, (availableWidth - (count - 1) * tileGap) / (count * tileAspect))
-      }
-      return Math.max(Style.space(48), Math.min(best, availableHeight * 0.3))
-    }
+    // Two workspaces on a big screen would otherwise fill it.
+    readonly property real tileHeight: Model.tileHeight(root.overviewRows, {
+      width: width - margin * 2, height: height - margin * 2 - footerHeight,
+      labelHeight: labelHeight, rowGap: rowGap, tileGap: tileGap,
+      aspect: tileAspect, minHeight: Style.space(48)
+    })
 
     // Nearly opaque, not the editor's scrim. The scrim dims a desktop you are
     // meant to still see; here the desktop behind would be read as part of
@@ -1428,6 +1396,34 @@ Item {
             }
           }
         }
+      }
+    }
+
+    // The window being dragged, under the pointer where it was picked up.
+    // It is what the tiles' DropAreas see; the window itself stays put until
+    // it is dropped.
+    Item {
+      id: dragGhost
+      visible: root.dragWindow !== null
+      x: root.dragPoint.x - root.dragGrab.x
+      y: root.dragPoint.y - root.dragGrab.y
+      width: root.dragSize.width
+      height: root.dragSize.height
+      opacity: 0.85
+      Drag.active: visible
+      Drag.hotSpot: root.dragGrab
+
+      ScreencopyView {
+        anchors.fill: parent
+        captureSource: root.dragWindow ? root.dragWindow.wayland : null
+        live: true
+      }
+      Rectangle {
+        anchors.fill: parent
+        color: "transparent"
+        radius: Math.max(2, Style.cornerRadius / 2)
+        border.width: 2
+        border.color: root.accent
       }
     }
 
@@ -1668,6 +1664,7 @@ Item {
       && Hyprland.focusedWorkspace.id === modelData
     readonly property bool shown: ui.isShown(modelData)
     readonly property bool selected: ui.overviewSelected === modelData && ui.presetCursor < 0
+    readonly property bool dropping: dropArea.containsDrag && ui.dragFrom !== modelData
     readonly property real unit: Math.min(width / monitor.width, height / monitor.height)
     // Where the monitor's picture starts, centred when its shape is narrower
     // than the tile's.
@@ -1677,8 +1674,8 @@ Item {
     radius: Style.cornerRadius
     clip: true
     color: Qt.rgba(ui.foreground.r, ui.foreground.g, ui.foreground.b, tileHover.hovered ? 0.12 : 0.06)
-    border.width: selected ? 2 : 1
-    border.color: selected ? ui.accent
+    border.width: selected || dropping ? 2 : 1
+    border.color: selected || dropping ? ui.accent
       : Qt.rgba(ui.foreground.r, ui.foreground.g, ui.foreground.b, shown ? 0.5 : 0.2)
 
     // An empty workspace is still a place you can go, so it keeps its number
@@ -1740,6 +1737,26 @@ Item {
           captureSource: tile.ui.overviewShown ? shotFrame.modelData.wayland : null
           live: true
         }
+
+        // Picked up, the window leaves a ghost under the pointer and dims
+        // where it was; let go over another tile, it moves there.
+        opacity: tile.ui.dragWindow === shotFrame.modelData ? 0.3 : 1
+        DragHandler {
+          target: null
+          cursorShape: Qt.ClosedHandCursor
+          onActiveChanged: {
+            if (active) {
+              tile.ui.dragFrom = tile.modelData
+              tile.ui.dragSize = Qt.size(shotFrame.width, shotFrame.height)
+              tile.ui.dragGrab = centroid.pressPosition
+              tile.ui.dragPoint = centroid.scenePosition
+              tile.ui.dragWindow = shotFrame.modelData
+            } else {
+              tile.ui.dropWindow()
+            }
+          }
+          onCentroidChanged: if (active) tile.ui.dragPoint = centroid.scenePosition
+        }
       }
     }
 
@@ -1780,6 +1797,13 @@ Item {
       }
     }
     TapHandler { onTapped: tile.ui.jumpTo(tile.modelData) }
+
+    DropArea {
+      id: dropArea
+      anchors.fill: parent
+      onEntered: tile.ui.dropWorkspace = tile.modelData
+      onExited: if (tile.ui.dropWorkspace === tile.modelData) tile.ui.dropWorkspace = 0
+    }
   }
 
   // One saved preset under the overview: its name and how many windows it

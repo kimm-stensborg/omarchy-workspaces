@@ -323,6 +323,33 @@ local key_slots = $KEY_SLOTS
 LUA
     cat <<'LUA'
 
+-- Omarchy (4.5+) gives every monitor its own block of ten numbers — 1-10,
+-- 11-20, 21-30 — and on every reload and hotplug walks each monitor back onto
+-- its own block. That fights the pins above: the third monitor holding 1-4 is
+-- pushed onto 21, and a workspace moved to another monitor is renumbered into
+-- that monitor's block. This layout is one set of global numbers, so the
+-- block logic is switched off: its reconcile does nothing, its slots are plain
+-- workspace numbers, and the keys bound through it go back to plain dispatches.
+do
+  local ok, blocks = pcall(require, "default.hypr.monitor-workspaces")
+  if ok and type(blocks) == "table" then
+    blocks.reconcile = function() end
+    blocks.workspace_id = function(_, slot) return slot end
+  end
+  if o and o.rebind then
+    local function to_monitor(direction)
+      return function()
+        local target = hl.get_monitor(direction)
+        if target then hl.dispatch(hl.dsp.workspace.move({ monitor = target.name })) end
+      end
+    end
+    for key, direction in pairs({ LEFT = "l", RIGHT = "r", UP = "u", DOWN = "d" }) do
+      local names = { l = "left", r = "right", u = "up", d = "down" }
+      o.rebind("SUPER + SHIFT + ALT + " .. key, "Move workspace to " .. names[direction] .. " monitor", to_monitor(direction))
+    end
+  end
+end
+
 local disabled = {}
 for _, ws in ipairs(disabled_list) do disabled[ws] = true end
 
